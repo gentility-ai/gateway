@@ -22,10 +22,14 @@ const seededKey = "omp_SEEDED-client-key-0001"
 // can hold. The ids are as upstream makes them, a login file's carrying the
 // seeded email.
 type loginsHost struct {
-	mu    sync.Mutex
-	fail  bool
-	asked int
-	creds []hostCredential
+	mu     sync.Mutex
+	fail   bool
+	panics bool
+	asked  int
+	creds  []hostCredential
+	// When held is set, every list call says on calling that it has begun,
+	// then waits for held to close.
+	held, calling chan struct{}
 }
 
 func newLoginsHost() *loginsHost {
@@ -45,12 +49,19 @@ func newLoginsHost() *loginsHost {
 }
 
 func (h *loginsHost) call(method string, request []byte) ([]byte, error) {
+	if method == pluginabi.MethodHostAuthModels && h.held != nil {
+		h.calling <- struct{}{}
+		<-h.held
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if method != pluginabi.MethodHostAuthModels {
 		return nil, nil
 	}
 	h.asked++
+	if h.panics {
+		panic("injected host panic")
+	}
 	if h.fail {
 		return json.Marshal(pluginabi.Envelope{Error: &pluginabi.Error{Code: "host_call_failed", Message: "auth manager unavailable"}})
 	}
@@ -70,6 +81,34 @@ type scopeRig struct {
 	clock time.Time
 }
 
+// hold makes the host's list calls wait until the returned func is called.
+func (r *scopeRig) hold() (release func()) {
+	r.host.held, r.host.calling = make(chan struct{}), make(chan struct{}, 64)
+	return func() { close(r.host.held) }
+}
+
+// begun waits for a held list call to begin.
+func (r *scopeRig) begun(t *testing.T) {
+	t.Helper()
+	select {
+	case <-r.host.calling:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no list call began")
+	}
+}
+
+// allJoined waits for checks to join the read under way.
+func allJoined(t *testing.T, joined *sync.WaitGroup) {
+	t.Helper()
+	all := make(chan struct{})
+	go func() { joined.Wait(); close(all) }()
+	select {
+	case <-all:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the checks did not join the read under way")
+	}
+}
+
 func newScopeRig(t *testing.T) *scopeRig {
 	r := &scopeRig{host: newLoginsHost(), logs: &bytes.Buffer{}, clock: observed}
 	prevHost, prevScoped, prevWatched := hostCall, scoped, watched
@@ -77,7 +116,7 @@ func newScopeRig(t *testing.T) *scopeRig {
 	log.SetOutput(r.logs)
 	t.Cleanup(func() {
 		hostCall, scoped, watched = prevHost, prevScoped, prevWatched
-		scopeSeam = func() {}
+		scopeSeam, joinedListing = func() {}, func() {}
 		log.SetOutput(os.Stderr)
 	})
 	return r
@@ -109,6 +148,36 @@ func (a asked) raw() []byte {
 func send(t *testing.T, raw []byte) pluginapi.RequestInterceptResponse {
 	t.Helper()
 	answer, err := handleMethod(pluginabi.MethodRequestInterceptAfter, raw)
+	return answered(t, answer, err)
+}
+
+// sendLater makes the after-auth call on its own goroutine.
+func sendLater(raw []byte) <-chan []byte {
+	answer := make(chan []byte, 1)
+	go func() {
+		got, err := handleMethod(pluginabi.MethodRequestInterceptAfter, raw)
+		if err != nil {
+			got = []byte(err.Error())
+		}
+		answer <- got
+	}()
+	return answer
+}
+
+// await reads a sendLater answer, failing the test if it does not come.
+func await(t *testing.T, answer <-chan []byte) pluginapi.RequestInterceptResponse {
+	t.Helper()
+	select {
+	case got := <-answer:
+		return answered(t, got, nil)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the after-auth call did not answer within 5 s")
+		return pluginapi.RequestInterceptResponse{}
+	}
+}
+
+func answered(t *testing.T, answer []byte, err error) pluginapi.RequestInterceptResponse {
+	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,6 +394,130 @@ func TestTheLoginListIsTrustedForAMinute(t *testing.T) {
 	r.host.mu.Unlock()
 	r.clock = observed.Add(time.Minute)
 	r.refused(t, send(t, keyed("omp_k", "zai").raw()), "another harness's login")
+}
+
+// Checks that need the list while it is being read wait on that read: the
+// host is called once for all of them. Were the host called under the lock,
+// the later checks would wait on the lock and never join.
+func TestChecksDuringARefreshShareOneHostCall(t *testing.T) {
+	r := newScopeRig(t)
+	release := r.hold()
+	var joined sync.WaitGroup
+	joined.Add(5)
+	joinedListing = joined.Done
+	first := sendLater(keyed("omp_k", "zai").raw())
+	r.begun(t)
+	later := []<-chan []byte{}
+	for _, a := range []asked{keyed("omp_k", "zai"), keyed("claude_k", "claude-oauth"), keyed("codex_k", "codex-key"),
+		keyed("omp_k", "gone"), keyed("omp_k", "claude-oauth")} {
+		later = append(later, sendLater(a.raw()))
+	}
+	allJoined(t, &joined)
+	release()
+	for _, answer := range append([]<-chan []byte{first}, later[:3]...) {
+		allowed(t, await(t, answer))
+	}
+	gone, crossed := await(t, later[3]), await(t, later[4])
+	r.refused(t, gone, "a login the host does not list")
+	r.refused(t, crossed, "another harness's login")
+	if n := r.host.times(); n != 1 {
+		t.Fatalf("the host was asked %d times, want once for all six checks", n)
+	}
+}
+
+// A check the list answers does not wait behind a read another check needs.
+func TestAListedLoginIsAnsweredDuringARefresh(t *testing.T) {
+	r := newScopeRig(t)
+	allowed(t, send(t, keyed("omp_k", "zai").raw()))
+	release := r.hold()
+	gone := sendLater(keyed("omp_k", "gone").raw())
+	r.begun(t)
+	allowed(t, await(t, sendLater(keyed("omp_k", "zai").raw())))
+	release()
+	r.refused(t, await(t, gone), "a login the host does not list")
+}
+
+// A login the host does not list is refused for five seconds without asking
+// the host again; after that the list is read once more, and a login that has
+// appeared meanwhile is served.
+func TestAMissedLoginIsNotAskedForAgainForFiveSeconds(t *testing.T) {
+	r := newScopeRig(t)
+	allowed(t, send(t, keyed("omp_k", "zai").raw()))
+	r.refused(t, send(t, keyed("omp_k", "gone").raw()), "a login the host does not list")
+	r.clock = observed.Add(missFresh - time.Millisecond)
+	r.logs.Reset()
+	r.refused(t, send(t, keyed("omp_k", "gone").raw()), "a login the host does not list")
+	if n := r.host.times(); n != 2 {
+		t.Fatalf("the host was asked %d times, want 2: the miss inside its window asks again", n)
+	}
+	r.clock = observed.Add(missFresh)
+	r.logs.Reset()
+	r.refused(t, send(t, keyed("omp_k", "gone").raw()), "a login the host does not list")
+	if n := r.host.times(); n != 3 {
+		t.Fatalf("the host was asked %d times, want 3: once more after the window", n)
+	}
+	r.host.mu.Lock()
+	r.host.creds = append(r.host.creds, hostCredential{ID: "openai-compatibility:gone:0123456789ab", AuthIndex: "gone", Provider: "openai-compatible-gone"})
+	r.host.mu.Unlock()
+	r.clock = observed.Add(2*missFresh - time.Millisecond)
+	r.logs.Reset()
+	r.refused(t, send(t, keyed("omp_k", "gone").raw()), "a login the host does not list")
+	r.clock = observed.Add(2 * missFresh)
+	allowed(t, send(t, keyed("omp_k", "gone").raw()))
+	if n := r.host.times(); n != 4 {
+		t.Fatalf("the host was asked %d times, want 4", n)
+	}
+}
+
+// A read that fails refuses, whether the list was stale, the login unknown
+// or the check waited on another's read, and is not taken for a miss.
+func TestARefreshThatFailsStillRefuses(t *testing.T) {
+	r := newScopeRig(t)
+	allowed(t, send(t, keyed("omp_k", "zai").raw()))
+	r.host.mu.Lock()
+	r.host.fail = true
+	r.host.mu.Unlock()
+	r.clock = observed.Add(loginsFresh)
+	r.refused(t, send(t, keyed("omp_k", "zai").raw()), "the host did not list its logins")
+	r.logs.Reset()
+	r.refused(t, send(t, keyed("omp_k", "gone").raw()), "the host did not list its logins")
+
+	r.logs.Reset()
+	release := r.hold()
+	var joined sync.WaitGroup
+	joined.Add(1)
+	joinedListing = joined.Done
+	first := sendLater(keyed("omp_k", "zai").raw())
+	r.begun(t)
+	second := sendLater(keyed("omp_k", "zai").raw())
+	allJoined(t, &joined)
+	release()
+	firstAnswer, secondAnswer := await(t, first), await(t, second)
+	r.refused(t, firstAnswer, "the host did not list its logins")
+	r.refused(t, secondAnswer, "the host did not list its logins")
+
+	// The failures left no miss behind: the host answers again, and is asked.
+	r.host.mu.Lock()
+	r.host.fail = false
+	r.host.mu.Unlock()
+	r.host.held = nil
+	asked := r.host.times()
+	allowed(t, send(t, keyed("omp_k", "zai").raw()))
+	if n := r.host.times(); n != asked+1 {
+		t.Fatalf("the host was asked %d times, want %d", n, asked+1)
+	}
+}
+
+// A host call that panics refuses the check that made it and leaves no read
+// for the next check to wait on.
+func TestAHostCallThatPanicsLeavesNoCheckWaiting(t *testing.T) {
+	r := newScopeRig(t)
+	r.host.panics = true
+	r.refused(t, send(t, keyed("omp_k", "zai").raw()), "a panic")
+	r.host.mu.Lock()
+	r.host.panics = false
+	r.host.mu.Unlock()
+	allowed(t, await(t, sendLater(keyed("omp_k", "zai").raw())))
 }
 
 // The quota watch still learns which login serves a request, allowed or not.

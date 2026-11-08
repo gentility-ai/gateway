@@ -27,16 +27,36 @@ var keyPrefixes = map[string]string{"omp_": "omp", "claude_": "claude", "codex_"
 // provider's login; a minute bounds how long a stale answer is believed.
 const loginsFresh = time.Minute
 
+// A login the list does not hold is taken as absent for five seconds, so a
+// request for it is refused without asking the host again: the list is read
+// once per window, not once per request.
+const missFresh = 5 * time.Second
+
 // scopeSeam runs at the start of every check. Tests make it panic.
 var scopeSeam = func() {}
 
+// joinedListing runs when a check waits on a list another check is reading.
+// Tests count it.
+var joinedListing = func() {}
+
 // logins knows the harness of every login the host holds, by auth_index. A
 // login with no harness is kept as "" so it is refused without a refresh.
+// The host is never called under mu: a check whose answer is in the list
+// does not wait behind a refresh, and checks that need one share it.
 type logins struct {
 	mu       sync.Mutex
 	harness  map[string]string
 	listedAt time.Time
+	missed   map[string]time.Time
+	reading  *listing
 	now      func() time.Time
+}
+
+// listing is one read of the host's list, which every check that needs it
+// waits on.
+type listing struct {
+	done chan struct{}
+	err  error
 }
 
 var scoped = &logins{now: time.Now}
@@ -74,38 +94,88 @@ func loginHarness(c hostCredential) string {
 	return ""
 }
 
-// refresh reads the host's logins again. The ids are read for their kind and
-// dropped: a login file's id is its name, which can carry its email.
-func (l *logins) refresh() error {
+// list reads the host's logins. The ids are read for their kind and dropped:
+// a login file's id is its name, which can carry its email.
+func list() (map[string]string, error) {
 	var listed struct{ Credentials []hostCredential }
 	if err := callHost(pluginabi.MethodHostAuthModels, map[string]string{"auth_index": ""}, &listed); err != nil {
-		return errors.New("the host did not list its logins")
+		return nil, errors.New("the host did not list its logins")
 	}
-	l.harness = map[string]string{}
+	harness := map[string]string{}
 	for _, c := range listed.Credentials {
 		if c.AuthIndex != "" {
-			l.harness[c.AuthIndex] = loginHarness(c)
+			harness[c.AuthIndex] = loginHarness(c)
 		}
 	}
-	l.listedAt = l.now()
-	return nil
+	return harness, nil
 }
 
-// harnessOf answers from the list while it is fresh, and otherwise, or when
-// the login is not in it, reads the list once more.
+// harnessOf answers from the list while it is fresh, and refuses a login it
+// missed within missFresh. Otherwise it reads the list once more, or waits on
+// the read already under way. A read that fails refuses every check waiting
+// on it, and leaves the list as it was.
 func (l *logins) harnessOf(index string) (harness string, known bool, err error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.harness != nil && l.now().Sub(l.listedAt) < loginsFresh {
+	now := l.now()
+	if l.harness != nil && now.Sub(l.listedAt) < loginsFresh {
 		if h, found := l.harness[index]; found {
+			l.mu.Unlock()
 			return h, true, nil
 		}
 	}
-	if err := l.refresh(); err != nil {
-		return "", false, err
+	if at, missed := l.missed[index]; missed && now.Sub(at) < missFresh {
+		l.mu.Unlock()
+		return "", false, nil
 	}
+	read := l.reading
+	if read == nil {
+		read = &listing{done: make(chan struct{})}
+		l.reading = read
+		l.mu.Unlock()
+		l.read(read)
+	} else {
+		l.mu.Unlock()
+		joinedListing()
+		<-read.done
+	}
+	if read.err != nil {
+		return "", false, read.err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	harness, known = l.harness[index]
+	if !known {
+		if l.missed == nil {
+			l.missed = map[string]time.Time{}
+		}
+		l.missed[index] = l.now()
+	}
 	return harness, known, nil
+}
+
+// read calls the host outside the lock and publishes what it heard to every
+// check waiting on it, even when the call panics: the read counts as failed
+// until the host has answered, so no waiter is left waiting or let through.
+// Misses older than the window are dropped then, so the map holds only the
+// last few seconds' misses.
+func (l *logins) read(read *listing) {
+	var harness map[string]string
+	read.err = errors.New("the host did not list its logins")
+	defer func() {
+		l.mu.Lock()
+		l.reading = nil
+		if read.err == nil {
+			l.harness, l.listedAt = harness, l.now()
+			for index, at := range l.missed {
+				if l.listedAt.Sub(at) >= missFresh {
+					delete(l.missed, index)
+				}
+			}
+		}
+		l.mu.Unlock()
+		close(read.done)
+	}()
+	harness, read.err = list()
 }
 
 // callerScope is upstream's handle for the key that authenticated a request
