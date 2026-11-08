@@ -195,7 +195,8 @@ plugins:
 
 	proxy := exec.Command(bin, "--config", configPath)
 	proxy.Env = append(os.Environ(), "GENTILITY_USAGE_URL="+receiver.URL+"/desk/gateway/usage", "GENTILITY_USAGE_SPOOL="+filepath.Join(dir, "spool"))
-	proxy.Stdout, proxy.Stderr = os.Stdout, os.Stderr
+	var log watched
+	proxy.Stdout, proxy.Stderr = io.MultiWriter(os.Stdout, &log), io.MultiWriter(os.Stderr, &log)
 	if err := proxy.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +230,14 @@ plugins:
 			t.Fatal("the proxy never answered /v1/models with the sentinel")
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+	// Key changes reach the live proxy only through its config file watcher,
+	// which starts after the proxy first answers.
+	for !log.has("file watcher started") {
+		if time.Now().After(deadline) {
+			t.Fatal("the proxy never started its config file watcher")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	accepted := func(key string) bool { return server("probe_key", map[string]string{"key": key}).StatusCode == 200 }
@@ -360,4 +369,22 @@ plugins:
 			}
 		}
 	})
+}
+
+// watched keeps the proxy's output so a test can wait for a line in it.
+type watched struct {
+	mu  sync.Mutex
+	out bytes.Buffer
+}
+
+func (w *watched) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.out.Write(p)
+}
+
+func (w *watched) has(line string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return bytes.Contains(w.out.Bytes(), []byte(line))
 }
