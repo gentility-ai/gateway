@@ -22,6 +22,20 @@ import (
 const management = "contract-management-key"
 const sentinel = "contract-sentinel"
 
+// A key's prefix names its harness (key_prefixes.json). The omp key is added
+// and deleted through the server's calls; the other two are in the config.
+const (
+	ompKey    = "omp_k1"
+	claudeKey = "claude_contract"
+	codexKey  = "codex_contract"
+)
+
+const (
+	compatModel = "glm-5.3-flash"
+	claudeModel = "claude-contract"
+	codexModel  = "codex-contract"
+)
+
 type usage struct {
 	mu      sync.Mutex
 	records []map[string]any
@@ -128,17 +142,54 @@ func TestTheCallsTheServerMakes(t *testing.T) {
 		t.Skip("CLIPROXY_BIN and USAGE_PLUGIN name the pinned binary and the built plugin")
 	}
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/models" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "fake-up"}}})
+	// One fake upstream per login type, each counting the requests that reach
+	// it: the key scope check must refuse before any upstream call.
+	compat := newFake(func(w http.ResponseWriter, r *http.Request, stream bool) {
+		if !stream {
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "c1", "object": "chat.completion", "model": "fake-up",
+				"choices": []any{map[string]any{"index": 0, "finish_reason": "stop", "message": map[string]string{"role": "assistant", "content": "hi"}}},
+				"usage":   map[string]int{"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}})
 			return
 		}
 		w.Header().Set("content-type", "text/event-stream")
 		fmt.Fprint(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"fake-up","choices":[{"index":0,"delta":{"content":"hi"}}]}`+"\n\n")
 		fmt.Fprint(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"fake-up","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`+"\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
-	}))
-	defer upstream.Close()
+	})
+	defer compat.Close()
+	// The Claude executor posts to <base-url>/v1/messages, streaming whenever
+	// the client's format is not Claude's.
+	claude := newFake(func(w http.ResponseWriter, r *http.Request, stream bool) {
+		if !stream {
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-up",
+				"content": []any{map[string]string{"type": "text", "text": "hi"}}, "stop_reason": "end_turn",
+				"usage": map[string]int{"input_tokens": 7, "output_tokens": 3}})
+			return
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		for _, event := range []string{
+			`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-up","content":[],"stop_reason":null,"usage":{"input_tokens":7,"output_tokens":0}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+			`{"type":"content_block_stop","index":0}`,
+			`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`,
+			`{"type":"message_stop"}`,
+		} {
+			var typed struct{ Type string }
+			_ = json.Unmarshal([]byte(event), &typed)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typed.Type, event)
+		}
+	})
+	defer claude.Close()
+	// The Codex executor always streams from <base-url>/responses.
+	codex := newFake(func(w http.ResponseWriter, r *http.Request, stream bool) {
+		w.Header().Set("content-type", "text/event-stream")
+		item := `{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi","annotations":[]}]}`
+		fmt.Fprint(w, `data: {"type":"response.created","response":{"id":"r1","object":"response","status":"in_progress","model":"gpt-up","output":[]}}`+"\n\n")
+		fmt.Fprint(w, `data: {"type":"response.output_item.done","output_index":0,"item":`+item+`}`+"\n\n")
+		fmt.Fprint(w, `data: {"type":"response.completed","response":{"id":"r1","object":"response","created_at":1,"status":"completed","model":"gpt-up","output":[`+item+`],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}`+"\n\n")
+	})
+	defer codex.Close()
 
 	got := &usage{}
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +225,7 @@ management:
   allow-remote: false
   secret-key: %q
 access:
-  api-keys: [%q]
+  api-keys: [%q, %q, %q]
 openai-compatibility:
   - name: fake
     base-url: %q
@@ -183,13 +234,26 @@ openai-compatibility:
     models:
       - name: "fake-up"
         alias: "glm-5.3-flash"
+claude-api-key:
+  - api-key: "upstream-claude-key"
+    base-url: %q
+    models:
+      - name: "claude-up"
+        alias: %q
+codex-api-key:
+  - api-key: "upstream-codex-key"
+    base-url: %q
+    models:
+      - name: "gpt-up"
+        alias: %q
 plugins:
   enabled: true
   dir: %q
   configs:
     gentility-usage:
       enabled: true
-`, port, filepath.Join(dir, "auths"), management, sentinel, upstream.URL+"/v1", pluginDir)
+`, port, filepath.Join(dir, "auths"), management, sentinel, claudeKey, codexKey, compat.URL+"/v1",
+		claude.URL, claudeModel, codex.URL, codexModel, pluginDir)
 	configPath := filepath.Join(dir, "config.yaml")
 	_ = os.WriteFile(configPath, []byte(config), 0o600)
 
@@ -253,18 +317,18 @@ plugins:
 	}
 
 	t.Run("add", func(t *testing.T) {
-		resp := server("add_key", map[string]string{"key": "k1"})
+		resp := server("add_key", map[string]string{"key": ompKey})
 		if resp.StatusCode/100 != 2 {
 			t.Fatalf("PATCH answered %d", resp.StatusCode)
 		}
 	})
 	t.Run("probe", func(t *testing.T) {
-		if !waitFor(true, "k1") {
+		if !waitFor(true, ompKey) {
 			t.Fatal("an added key was not accepted within 2 s")
 		}
 	})
 	t.Run("usage_once", func(t *testing.T) {
-		resp := call(t, "POST", base+"/v1/chat/completions", "k1", nil, map[string]any{
+		resp := call(t, "POST", base+"/v1/chat/completions", ompKey, nil, map[string]any{
 			"model": "glm-5.3-flash", "stream": true, "stream_options": map[string]bool{"include_usage": true},
 			"messages": []map[string]string{{"role": "user", "content": "hi"}},
 		})
@@ -290,8 +354,67 @@ plugins:
 		if rec["alias"] != "glm-5.3-flash" || rec["input_tokens"].(float64) != 7 || rec["output_tokens"].(float64) != 3 {
 			t.Fatalf("record %v", rec)
 		}
-		if hash, _ := rec["key_hash"].(string); len(hash) != 64 || strings.Contains(hash, "k1") {
+		if hash, _ := rec["key_hash"].(string); len(hash) != 64 || strings.Contains(hash, ompKey) {
 			t.Fatalf("key hash %v", rec["key_hash"])
+		}
+	})
+	// Every key class against every login type. The requests carry their key
+	// in Authorization alone, so an allowed cell also proves the header is
+	// still there when the plugin's after-auth hook reads it.
+	t.Run("key_scope", func(t *testing.T) {
+		fakes := map[string]*fake{compatModel: compat, claudeModel: claude, codexModel: codex}
+		harness := map[string]string{ompKey: compatModel, claudeKey: claudeModel, codexKey: codexModel, sentinel: ""}
+		ask := func(key string, header map[string]string, model string) (int, string, map[string]int) {
+			before := map[string]int{}
+			for m, f := range fakes {
+				before[m] = f.count()
+			}
+			resp := call(t, "POST", base+"/v1/chat/completions", key, header, map[string]any{
+				"model": model, "messages": []map[string]string{{"role": "user", "content": "hi"}}})
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			reached := map[string]int{}
+			for m, f := range fakes {
+				if n := f.count() - before[m]; n > 0 {
+					reached[m] = n
+				}
+			}
+			return resp.StatusCode, string(body), reached
+		}
+		check := func(name string, allowed bool, model string, status int, body string, reached map[string]int) {
+			var refusal struct {
+				Error struct{ Type, Message string }
+			}
+			_ = json.Unmarshal([]byte(body), &refusal)
+			switch {
+			case allowed && (status != http.StatusOK || len(reached) != 1 || reached[model] != 1):
+				t.Errorf("%s: want allowed, got %d %s, upstreams reached %v", name, status, body, reached)
+			case !allowed && (status != http.StatusForbidden || refusal.Error.Type != "key_scope" || len(reached) != 0):
+				t.Errorf("%s: want a key_scope 403 and no upstream call, got %d %s, upstreams reached %v", name, status, body, reached)
+			case !allowed && (strings.Contains(body, ompKey) || strings.Contains(body, claudeKey) || strings.Contains(body, codexKey) || strings.Contains(body, sentinel)):
+				t.Errorf("%s: the refusal names a key: %s", name, body)
+			}
+			verdict := "refused"
+			if allowed {
+				verdict = "allowed"
+			}
+			t.Logf("%-55s %-7s %d %s", name, verdict, status, strings.TrimSpace(body))
+		}
+		for _, key := range []string{ompKey, claudeKey, codexKey, sentinel} {
+			for _, model := range []string{compatModel, claudeModel, codexModel} {
+				status, body, reached := ask(key, nil, model)
+				check(key+" -> "+model, harness[key] == model, model, status, body, reached)
+			}
+		}
+		// The proxy takes the first configured key among the headers. A
+		// made-up Claude key in Authorization beside a valid omp key in
+		// X-Api-Key is an omp request: the host's caller scope says so.
+		for _, model := range []string{compatModel, claudeModel} {
+			status, body, reached := ask("claude_madeup", map[string]string{"X-Api-Key": ompKey}, model)
+			check("Bearer claude_madeup + X-Api-Key "+ompKey+" -> "+model, model == compatModel, model, status, body, reached)
+		}
+		if !log.has("gentility-usage: refused request") {
+			t.Error("no refusal reached the proxy's log")
 		}
 	})
 	t.Run("quota_provider", func(t *testing.T) {
@@ -322,11 +445,11 @@ plugins:
 		}
 	})
 	t.Run("delete", func(t *testing.T) {
-		resp := server("delete_key", map[string]string{"key": "k1"})
+		resp := server("delete_key", map[string]string{"key": ompKey})
 		if resp.StatusCode/100 != 2 {
 			t.Fatalf("DELETE answered %d", resp.StatusCode)
 		}
-		if !waitFor(false, "k1") {
+		if !waitFor(false, ompKey) {
 			t.Fatal("a deleted key was still accepted after 2 s")
 		}
 	})
@@ -387,4 +510,34 @@ func (w *watched) has(line string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return bytes.Contains(w.out.Bytes(), []byte(line))
+}
+
+// fake is an upstream that counts the model requests reaching it.
+type fake struct {
+	*httptest.Server
+	mu sync.Mutex
+	n  int
+}
+
+func newFake(answer func(w http.ResponseWriter, r *http.Request, stream bool)) *fake {
+	f := &fake{}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "fake-up"}}})
+			return
+		}
+		f.mu.Lock()
+		f.n++
+		f.mu.Unlock()
+		var asked struct{ Stream bool }
+		_ = json.NewDecoder(r.Body).Decode(&asked)
+		answer(w, r, asked.Stream)
+	}))
+	return f
+}
+
+func (f *fake) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n
 }
