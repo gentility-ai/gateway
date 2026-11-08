@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 const (
@@ -333,6 +334,47 @@ func TestNoSecretReachesTheRecordTheFileOrTheLog(t *testing.T) {
 			if bytes.Contains(got, []byte(secret)) {
 				t.Fatalf("the %s holds %q:\n%s", name, secret, got)
 			}
+		}
+	}
+}
+
+func TestNoSecretReachesTheRecordRoute(t *testing.T) {
+	const credentialStamp, refreshToken, idToken = "stamp-SEEDED-credential", "refresh-SEEDED-token", "idtok-SEEDED-jwt"
+	file := filepath.Join(t.TempDir(), "gentility-quota.json")
+	seeded := `{"logins":[{"auth_index":"cx1","provider":"codex","plan":"pro","email":"` + seededEmail + `","account_id":"` + seededAccount +
+		`","access_token":"` + seededToken + `","refresh_token":"` + refreshToken + `","id_token":"` + idToken + `","windows":[],` +
+		`"poll":{"state":"stopped_unauthorized","failures":4,"credential":"` + credentialStamp + `"}},` +
+		`{"auth_index":"cl1","provider":"claude","windows":[],"poll":{"state":"backing_off","failures":3}}]}`
+	if err := os.WriteFile(file, []byte(seeded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	watched = newWatcher(file)
+	t.Cleanup(func() { watched = nil })
+	if l := watched.logins["cx1"]; l == nil || l.Poll.Credential != credentialStamp || l.Poll.Failures != 4 || watched.logins["cl1"].Poll.Failures != 3 {
+		t.Fatalf("the seeded record did not load: %+v", watched.logins)
+	}
+
+	asked, _ := json.Marshal(pluginapi.ManagementRequest{Method: "GET", Path: "/v0/management/gentility-usage/record",
+		Headers: http.Header{"X-Management-Key": {"mgmt-SEEDED-key"}, "Authorization": {"Bearer " + seededToken}}})
+	raw, err := handleMethod(pluginabi.MethodManagementHandle, asked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		OK     bool
+		Result pluginapi.ManagementResponse
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || !envelope.OK || envelope.Result.StatusCode != http.StatusOK {
+		t.Fatalf("envelope %s, %v", raw, err)
+	}
+	body := envelope.Result.Body
+	if !bytes.Contains(body, []byte(`"auth_index":"cx1"`)) || !bytes.Contains(body, []byte(`"state":"stopped_unauthorized"`)) {
+		t.Fatalf("the route did not show the record: %s", body)
+	}
+	for _, secret := range []string{seededEmail, seededAccount, seededToken, refreshToken, idToken, credentialStamp, "mgmt-SEEDED-key",
+		`"credential"`, `"failures"`, `"email"`, `"account_id"`, `"access_token"`, `"refresh_token"`, `"id_token"`} {
+		if bytes.Contains(body, []byte(secret)) {
+			t.Fatalf("the record route holds %s:\n%s", secret, body)
 		}
 	}
 }

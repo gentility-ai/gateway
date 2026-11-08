@@ -56,6 +56,16 @@
         "authorization": "Bearer <key>"
       },
       "body": null
+    },
+    {
+      "name": "read_quota",
+      "method": "GET",
+      "path": "/v0/management/gentility-usage/record",
+      "query": {},
+      "headers": {
+        "x-management-key": "<management_key>"
+      },
+      "body": null
     }
   ]
 }

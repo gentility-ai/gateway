@@ -22,7 +22,10 @@ built against the same release through the plugin ABI.
     never faster than once a minute, backing off on 429, stopping on 401 or
     403 until the login changes), and by the quota headers on real replies;
   - published through the proxy's `quota.describe` / `quota.fetch`
-    (`GET /v0/management/plugins/gentility-usage/quota?auth_index=…`).
+    (`GET /v0/management/plugins/gentility-usage/quota?auth_index=…`), and
+    for every login at once through the plugin's own management route,
+    `GET /v0/management/gentility-usage/record` (from plugin 0.4.0). Both
+    take the management key.
 
 No bearer, refresh token, id token, account id or email reaches the record,
 its file or the log; a test seeds fake ones to prove it.
@@ -31,7 +34,8 @@ its file or the log; a test seeds fake ones to prove it.
 
 `contract/` runs the real proxy release with the built plugin. It sends every
 management call the Gentility server makes, exactly as `contract/calls.json`
-lists them, plus one metered streamed completion. A release that answers any
+lists them, plus one metered streamed completion, and checks that the record
+route refuses a missing or wrong management key. A release that answers any
 of those differently fails here, not in production.
 
 ## Bundles

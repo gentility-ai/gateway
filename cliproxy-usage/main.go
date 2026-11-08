@@ -61,20 +61,28 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // The request and response hooks only read: the request hook names the login
 // chosen for a request, the response hooks carry its quota headers. Schema 8
 // leaves request bodies off all of them, and history off stream chunks.
-const registration = `{"schema_version":8,"metadata":{"Name":"gentility-usage","Version":"0.3.0","Author":"Gentility","GitHubRepository":"https://github.com/gentility-ai/gateway","Logo":"","ConfigFields":[]},"capabilities":{"usage_plugin":true,"quota_provider":true,"request_interceptor":true,"request_interceptor_omit_body_before":true,"request_interceptor_omit_body_after":true,"response_interceptor":true,"response_stream_interceptor":true}}`
+const registration = `{"schema_version":8,"metadata":{"Name":"gentility-usage","Version":"0.4.0","Author":"Gentility","GitHubRepository":"https://github.com/gentility-ai/gateway","Logo":"","ConfigFields":[]},"capabilities":{"usage_plugin":true,"quota_provider":true,"management_api":true,"request_interceptor":true,"request_interceptor_omit_body_before":true,"request_interceptor_omit_body_after":true,"response_interceptor":true,"response_stream_interceptor":true}}`
 
 const quotaDescription = `{"supported_providers":["codex","claude"],"display_name":"Gentility quota watch"}`
+
+// The record route, GET /v0/management/gentility-usage/record, is the plugin's
+// only management route, so every management.handle call is for it. The host
+// checks the management key before dispatching. It has no Menu: a GET route
+// with one would become an unauthenticated resource.
+const managementRoutes = `{"routes":[{"Method":"GET","Path":"/gentility-usage/record"}]}`
 
 var (
 	start    sync.Once
@@ -218,6 +226,16 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			return ok(json.RawMessage(`{}`))
 		}
 		raw, _ := json.Marshal(watched.fetch(asked.AuthIndex))
+		return ok(raw)
+	case pluginabi.MethodManagementRegister:
+		return ok(json.RawMessage(managementRoutes))
+	case pluginabi.MethodManagementHandle:
+		body := []byte(`{"format":1,"logins":[]}`)
+		if watched != nil {
+			body = watched.record()
+		}
+		raw, _ := json.Marshal(pluginapi.ManagementResponse{StatusCode: http.StatusOK,
+			Headers: http.Header{"Content-Type": {"application/json"}}, Body: body})
 		return ok(raw)
 	case pluginabi.MethodRequestInterceptBefore:
 		return ok(json.RawMessage(`{}`))

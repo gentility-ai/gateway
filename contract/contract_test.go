@@ -300,6 +300,18 @@ plugins:
 			t.Fatalf("quota providers %+v", listed.Providers)
 		}
 	})
+	t.Run("read_quota", func(t *testing.T) {
+		resp := server("read_quota", map[string]string{})
+		var record struct {
+			Format int
+			Logins []any
+		}
+		err := json.NewDecoder(resp.Body).Decode(&record)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || err != nil || record.Format != 1 || record.Logins == nil {
+			t.Fatalf("the record route answered %d, format %d, logins %v, %v", resp.StatusCode, record.Format, record.Logins, err)
+		}
+	})
 	t.Run("delete", func(t *testing.T) {
 		resp := server("delete_key", map[string]string{"key": "k1"})
 		if resp.StatusCode/100 != 2 {
@@ -324,6 +336,21 @@ plugins:
 		ok := server("write_keys", map[string]string{"etag": fresh.Header.Get("ETag"), "key": "k3"})
 		if ok.StatusCode/100 != 2 {
 			t.Fatalf("a fresh If-Match answered %d", ok.StatusCode)
+		}
+	})
+	// The record route is served from the proxy's NoRoute fallback, where a
+	// gap in management auth would hide. Each refusal counts towards upstream's
+	// lockout of five failed keys per address, so these two run last.
+	t.Run("read_quota_refuses_without_the_key", func(t *testing.T) {
+		path := calls["read_quota"].Path
+		for name, header := range map[string]map[string]string{"no key": nil, "a wrong key": {"X-Management-Key": "not-" + management}} {
+			resp := call(t, "GET", base+path, "", header, nil)
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Logf("with %s the record route answered %d %s", name, resp.StatusCode, body)
+			if resp.StatusCode/100 != 4 || bytes.Contains(body, []byte("logins")) {
+				t.Errorf("with %s the record route did not refuse", name)
+			}
 		}
 	})
 	t.Run("every_call_sent", func(t *testing.T) {

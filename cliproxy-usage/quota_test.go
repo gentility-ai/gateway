@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"os"
 	"reflect"
@@ -120,5 +121,51 @@ func TestFetchShowsEachWindowAndWhatIsHeld(t *testing.T) {
 	b := got.Groups[0].Buckets[0]
 	if got.Groups[0].DisplayName != "Codex" || b.Window != "Weekly" || b.ResetTime != "2026-11-13T04:21:47Z" || b.RemainingFraction < 0.0299 || b.RemainingFraction > 0.0301 {
 		t.Fatalf("group %+v", got.Groups[0])
+	}
+}
+
+func TestTheRecordRouteShowsEveryLoginInItsWireShape(t *testing.T) {
+	three, later := 3, observed.Add(10*time.Minute)
+	resetsAt := time.Unix(1794543707, 0).UTC()
+	w := newWatcher(t.TempDir() + "/gentility-quota.json")
+	w.logins = map[string]*login{
+		"b2": {AuthIndex: "b2", Provider: "claude", Credits: &credits{Enabled: false},
+			Windows: []window{{Kind: weeklyModel, Model: "claude-opus-4", UsedFraction: 1, ResetsAt: resetsAt, Source: "poll", ObservedAt: observed}},
+			Poll:    poll{State: stoppedUnauthorized, LastAt: observed, Credential: "2026-11-07T12:00:00Z"}},
+		"a1": {AuthIndex: "a1", Provider: "codex", Plan: "pro", Resets: &three, Credits: &credits{Enabled: true, Balance: "12.50"},
+			Windows: []window{
+				{Kind: fiveHour, UsedFraction: 0.12, ResetsAt: resetsAt, Source: "response", ObservedAt: observed},
+				{Kind: weekly, UsedFraction: 0.97, ResetsAt: resetsAt, Source: "poll", ObservedAt: observed},
+			},
+			Poll: poll{State: pollOK, LastAt: observed, NextAt: later}},
+		"c3": {AuthIndex: "c3", Provider: "codex", Windows: []window{}, Poll: poll{State: backingOff, LastAt: observed, NextAt: later, Failures: 2}},
+	}
+	want := `{"format":1,"logins":[
+		{"auth_index":"a1","provider":"codex","plan":"pro","resets":3,"credits":{"enabled":true,"balance":"12.50"},
+		 "windows":[
+			{"kind":"five_hour","used_fraction":0.12,"resets_at":"2026-11-13T04:21:47Z","source":"response","observed_at":"2026-11-07T14:48:00Z"},
+			{"kind":"weekly","used_fraction":0.97,"resets_at":"2026-11-13T04:21:47Z","source":"poll","observed_at":"2026-11-07T14:48:00Z"}],
+		 "poll":{"state":"ok","last_at":"2026-11-07T14:48:00Z","next_at":"2026-11-07T14:58:00Z"}},
+		{"auth_index":"b2","provider":"claude","credits":{"enabled":false},
+		 "windows":[{"kind":"weekly_model","model":"claude-opus-4","used_fraction":1,"resets_at":"2026-11-13T04:21:47Z","source":"poll","observed_at":"2026-11-07T14:48:00Z"}],
+		 "poll":{"state":"stopped_unauthorized","last_at":"2026-11-07T14:48:00Z"}},
+		{"auth_index":"c3","provider":"codex","windows":[],
+		 "poll":{"state":"backing_off","last_at":"2026-11-07T14:48:00Z","next_at":"2026-11-07T14:58:00Z"}}]}`
+	var got, expected any
+	if err := json.Unmarshal(w.record(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(want), &expected); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatalf("got %s", w.record())
+	}
+}
+
+func TestTheRecordRouteIsEmptyWithoutLogins(t *testing.T) {
+	w := newWatcher(t.TempDir() + "/gentility-quota.json")
+	if got := string(w.record()); got != `{"format":1,"logins":[]}` {
+		t.Fatalf("got %s", got)
 	}
 }

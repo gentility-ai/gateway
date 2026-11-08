@@ -357,6 +357,23 @@ func (w *watcher) fetch(authIndex string) quotaFetch {
 	return quotaFetch{}
 }
 
+// record is every login's quota record as the record route answers it, in
+// auth_index order.
+func (w *watcher) record() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := struct {
+		Format int     `json:"format"`
+		Logins []shown `json:"logins"`
+	}{Format: 1, Logins: []shown{}}
+	for _, l := range w.logins {
+		out.Logins = append(out.Logins, l.shown())
+	}
+	sort.Slice(out.Logins, func(i, j int) bool { return out.Logins[i].AuthIndex < out.Logins[j].AuthIndex })
+	raw, _ := json.Marshal(out)
+	return raw
+}
+
 // save writes the record through to its file when it has changed.
 func (w *watcher) save() {
 	w.saving.Lock()

@@ -293,3 +293,20 @@ func (l login) fetch() quotaFetch {
 	out.Groups = []quotaGroup{group}
 	return out
 }
+
+// shown is a login as the record route shows it. Its poll leaves out the
+// failure count and the credential stamp, which only the watcher reads.
+type shown struct {
+	login
+	Poll shownPoll `json:"poll"`
+}
+
+type shownPoll struct {
+	State  string    `json:"state"`
+	LastAt time.Time `json:"last_at,omitzero"`
+	NextAt time.Time `json:"next_at,omitzero"`
+}
+
+func (l login) shown() shown {
+	return shown{login: l, Poll: shownPoll{State: l.Poll.State, LastAt: l.Poll.LastAt, NextAt: l.Poll.NextAt}}
+}
