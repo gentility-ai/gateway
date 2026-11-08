@@ -447,6 +447,8 @@ plugins:
 				func(m string) map[string]any { return map[string]any{"model": m, "input": "hi"} }, false},
 			{"POST /backend-api/codex/responses", "/backend-api/codex/responses", "",
 				func(m string) map[string]any { return map[string]any{"model": m, "input": "hi", "stream": true} }, false},
+			{"POST /backend-api/codex/responses/compact", "/backend-api/codex/responses/compact", "",
+				func(m string) map[string]any { return map[string]any{"model": m, "input": "hi"} }, false},
 			// There is no Gemini login: a Gemini route asking for another
 			// login's model is served by that login, so it is scoped by that
 			// login's harness.
@@ -512,36 +514,38 @@ plugins:
 			t.Logf("%s %d %s", name, resp.StatusCode, short(string(raw)))
 		}
 
-		// GET /v1/responses is a websocket, its key checked once at the
-		// upgrade and its login chosen on every turn. Each cell is two turns:
-		// the same model twice, and, from a key's own model, a turn to
-		// another harness's. Upstream writes a 403 from the hook as no frame
-		// at all, only a closed socket
+		// GET /v1/responses, and Codex's own GET /backend-api/codex/responses,
+		// are a websocket, its key checked once at the upgrade and its login
+		// chosen on every turn. Each cell is two turns: the same model twice,
+		// and, from a key's own model, a turn to another harness's. Upstream
+		// writes a 403 from the hook as no frame at all, only a closed socket
 		// (sdk/api/handlers/openai/openai_responses_websocket_forward.go:
 		// 398-410 and 459-470), so a refused turn is a close with no
 		// response frame, no upstream call and the plugin's refusal in the
 		// proxy's log. An error frame that says key_scope is taken too.
-		wsBase := "ws" + strings.TrimPrefix(base, "http") + "/v1/responses"
 		type wsCell struct {
-			key   string
-			turns [2]string
+			path, key string
+			turns     [2]string
 		}
 		cells := []wsCell{}
-		for _, key := range []string{ompKey, claudeKey, codexKey, sentinel} {
-			for _, model := range []string{compatModel, claudeModel, codexModel} {
-				cells = append(cells, wsCell{key, [2]string{model, model}})
+		for _, path := range []string{"/v1/responses", "/backend-api/codex/responses"} {
+			for _, key := range []string{ompKey, claudeKey, codexKey, sentinel} {
+				for _, model := range []string{compatModel, claudeModel, codexModel} {
+					cells = append(cells, wsCell{path, key, [2]string{model, model}})
+				}
 			}
+			cells = append(cells, wsCell{path, ompKey, [2]string{compatModel, codexModel}},
+				wsCell{path, claudeKey, [2]string{claudeModel, compatModel}}, wsCell{path, codexKey, [2]string{codexModel, claudeModel}})
 		}
-		cells = append(cells, wsCell{ompKey, [2]string{compatModel, codexModel}},
-			wsCell{claudeKey, [2]string{claudeModel, compatModel}}, wsCell{codexKey, [2]string{codexModel, claudeModel}})
 		for _, cell := range cells {
-			conn, _, err := websocket.DefaultDialer.Dial(wsBase, http.Header{"Authorization": {"Bearer " + cell.key}})
+			conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(base, "http")+cell.path,
+				http.Header{"Authorization": {"Bearer " + cell.key}})
 			if err != nil {
-				t.Errorf("ws %s: dial: %v", cell.key, err)
+				t.Errorf("ws %s %s: dial: %v", cell.path, cell.key, err)
 				continue
 			}
 			for turn, model := range cell.turns {
-				name := fmt.Sprintf("%-44s %-15s -> %s", fmt.Sprintf("GET /v1/responses websocket, turn %d", turn+1), cell.key, model)
+				name := fmt.Sprintf("%-44s %-15s -> %s", fmt.Sprintf("GET %s websocket, turn %d", cell.path, turn+1), cell.key, model)
 				before, refusalsBefore := counts(), log.count("gentility-usage: refused request")
 				frame := map[string]any{"type": "response.create", "model": model, "input": []any{map[string]any{
 					"type": "message", "role": "user", "content": []any{map[string]string{"type": "input_text", "text": "hi"}}}}}
