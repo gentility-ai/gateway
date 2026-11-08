@@ -1,0 +1,30 @@
+# Every change: the tool and plugin tests, then a full bundle build against
+# upstream's latest release, contract test included. Nothing is signed or
+# published here, and no secret is in reach, so a fork's PR may run it.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cliproxy-usage/go.mod
+      - name: Bundle tool
+        working-directory: bundle
+        run: go vet ./... && go test -count=1 ./...
+      - name: Build against upstream's latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: "1"
+        run: scripts/build

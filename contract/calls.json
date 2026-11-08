@@ -1,0 +1,61 @@
+{
+  "format": 1,
+  "about": "The CLIProxyAPI management calls gentility-core's Gentility.Sessions.OmpGateway makes, and no others. A value in angle brackets is a placeholder: <key> a session key, <sentinel> the sentinel key, <management_key> the management key, <etag> the ETag the read answered with. A body is the JSON sent, with placeholders; null is no body.",
+  "calls": [
+    {
+      "name": "add_key",
+      "method": "PATCH",
+      "path": "/v0/management/api-keys",
+      "query": {},
+      "headers": {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "x-management-key": "<management_key>"
+      },
+      "body": {"old": "<key>", "new": "<key>"}
+    },
+    {
+      "name": "delete_key",
+      "method": "DELETE",
+      "path": "/v0/management/api-keys",
+      "query": {"value": "<key>"},
+      "headers": {
+        "x-management-key": "<management_key>"
+      },
+      "body": null
+    },
+    {
+      "name": "read_keys",
+      "method": "GET",
+      "path": "/v8/management/config/access/api-keys",
+      "query": {},
+      "headers": {
+        "x-management-key": "<management_key>"
+      },
+      "body": null
+    },
+    {
+      "name": "write_keys",
+      "method": "PUT",
+      "path": "/v8/management/config/access/api-keys",
+      "query": {},
+      "headers": {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "if-match": "<etag>",
+        "x-management-key": "<management_key>"
+      },
+      "body": ["<sentinel>", "<key>"]
+    },
+    {
+      "name": "probe_key",
+      "method": "GET",
+      "path": "/v1/models",
+      "query": {},
+      "headers": {
+        "authorization": "Bearer <key>"
+      },
+      "body": null
+    }
+  ]
+}

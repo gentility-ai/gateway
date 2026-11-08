@@ -1,0 +1,104 @@
+# Follows upstream: hourly, on every push to main and by hand, build a bundle
+# for upstream's latest release (or the one asked for) unless it is already
+# published. The build job holds no secret. Only the publish job signs, under
+# the publish environment, which main alone may use. A red build publishes
+# nothing and opens (or comments on) an issue.
+name: release
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream version, e.g. 8.0.60; empty for the latest"
+        default: ""
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      bundle: ${{ steps.build.outputs.bundle }}
+      skip: ${{ steps.build.outputs.skip }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cliproxy-usage/go.mod
+      - id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/build "${{ inputs.version }}"
+      - if: steps.build.outputs.skip == 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bundle
+          path: dist/${{ steps.build.outputs.bundle }}/
+          if-no-files-found: error
+      - if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.build.outputs.bundle }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Build failed: gateway-${BUNDLE:-unknown}"
+          open=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number')
+          if [ -n "$open" ]; then gh issue comment "$open" --body "Failed again: $RUN"
+          else gh issue create --title "$title" --body "Nothing was published. $RUN"; fi
+
+  publish:
+    needs: build
+    if: needs.build.outputs.skip == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: publish
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: bundle/go.mod
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle
+          path: dist
+      - name: Sign, then verify against the pinned set
+        env:
+          GATEWAY_SIGNING_KEY: ${{ secrets.GATEWAY_SIGNING_KEY }}
+        run: |
+          cd bundle
+          go run . sign -dir ../dist
+          go run . verify -dir ../dist -keys ../keys.json
+      - name: Pack
+        run: |
+          cd dist
+          m=$(cat manifest.json)
+          tar -cf bundle.tar manifest.json manifest.sig "$(jq -r .upstream.archive <<<"$m")" "$(jq -r .plugin.file <<<"$m")"
+          jq -r '"Bundle \(.bundle): CLIProxyAPI \(.upstream.version) (sha256 \(.upstream.sha256)) with gentility-usage \(.plugin.version) (\(.plugin.commit)).\n\nLines marked ⚑ touch what the gateway depends on.\n" + ([.changelog[] | "### \(.version)\n\n" + ([.lines[] | "- " + (if .flagged then "⚑ " else "" end) + .text] | join("\n"))] | join("\n\n"))' manifest.json > notes.md
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/bundle.tar
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ needs.build.outputs.bundle }}
+        run: |
+          cd dist
+          gh release create "gateway-$BUNDLE" bundle.tar manifest.json manifest.sig \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "gateway $BUNDLE" --notes-file notes.md
