@@ -35,7 +35,24 @@ its harness (`contract/key_prefixes.json`); a request is served only by a
 login of that harness: `claude` logins for `claude_` keys, `codex` logins
 for `codex_` keys, openai-compatibility logins for `omp_` keys. Anything
 else, including a key with no prefix, a login of another provider or a check
-that cannot decide, gets a `key_scope` 403 before any upstream call.
+that cannot decide, gets a `key_scope` 403 before any upstream call. On the
+Responses websocket upstream drops the 403's body and closes the socket.
+
+The scope holds only while the plugin is loaded and not fused. Paths are in
+upstream's `internal/pluginhost/` at v8.0.61:
+- upstream keeps serving when the plugin fails to load or register, and has
+  no option to require a plugin (`host.go:355-370` and `412-420`);
+- a panic the host recovers in any of the plugin's adapters fuses the
+  plugin until its file is replaced or removed, so in practice for the
+  process's lifetime, and a fused plugin's interceptors are skipped
+  (`adapters_usage_translation.go:97-106`, `adapters_interceptors.go:22-25`
+  and `144-147`);
+- the host takes an interceptor's error as a no-op
+  (`adapters_interceptors.go:33-37`), so the check never returns one: it
+  answers a refusal, and recovers its own panics into one.
+
+The prefix table is compiled into the plugin. A test holds it to
+`contract/key_prefixes.json`; the file is not read at runtime.
 
 ## The contract test
 

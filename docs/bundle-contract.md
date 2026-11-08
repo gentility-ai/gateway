@@ -212,4 +212,7 @@ mints (`omp_`, `claude_`, `codex_`) to the harness it names. From plugin
 0.5.0 the plugin refuses, with a `key_scope` 403 before any upstream call, a
 request whose key's harness is not the harness of the login serving it; an
 unprefixed key gets no inference. The server pins a copy of the file, and a
-plugin test holds the plugin's table to it.
+plugin test holds the plugin's table to it; the plugin does not read the file
+at runtime. The refusal depends on the plugin being loaded and not fused:
+upstream serves without it, so the README's key scoping section says when
+that happens.
