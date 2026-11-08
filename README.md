@@ -50,6 +50,30 @@ upstream's `internal/pluginhost/` at v8.0.61:
 - the host takes an interceptor's error as a no-op
   (`adapters_interceptors.go:33-37`), so the check never returns one: it
   answers a refusal, and recovers its own panics into one.
+- the host also skips interceptors when it holds no current plugin record
+  (a failed record, a disable, an unload or shutdown, or the plugin gone in
+  the middle of a request: `host.go:1001-1021`, and upstream's
+  `sdk/api/handlers/handlers_interceptors.go:620`). Whether a hot-reload swap
+  leaves a gap has not been checked.
+
+So something must watch it: a check after each install that a `claude_` key
+or the sentinel asking for a compat model gets the `key_scope` 403, and an
+alert on the proxy's "pluginhost: plugin panic recovered" log line.
+
+Two more paths, from upstream's `sdk/cliproxy/auth/` at v8.0.60:
+- **The Antigravity credits fallback** (non-streaming,
+  `conductor_execution.go:176-182` → `conductor_home.go:1492`) runs on another
+  login without the hook. It is live only with
+  `quota-exceeded.antigravity-credits` on and an Antigravity login present.
+  Keep both off where the scope matters.
+- **A streaming refusal** passes through the request-scoped error rules
+  (`conductor_request_scoped_errors.go:187-217`). A rule with action
+  `continue` or `continue-and-cooldown` that matches a 403 tries the next
+  login. The hook runs again for that login, so this is no bypass, but keep
+  such rules out of the config.
+
+The routes that never reach the hook (Codex alpha search, live and realtime)
+are listed in gentility-core's task T-375.
 
 The prefix table is compiled into the plugin. A test holds it to
 `contract/key_prefixes.json`; the file is not read at runtime.
