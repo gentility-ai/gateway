@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const management = "contract-management-key"
@@ -145,6 +147,12 @@ func TestTheCallsTheServerMakes(t *testing.T) {
 	// One fake upstream per login type, each counting the requests that reach
 	// it: the key scope check must refuse before any upstream call.
 	compat := newFake(func(w http.ResponseWriter, r *http.Request, stream bool) {
+		// The compat executor sends /v1/responses/compact on to the
+		// upstream's own compact route; everything else is a chat completion.
+		if strings.HasSuffix(r.URL.Path, "/responses/compact") {
+			_ = json.NewEncoder(w).Encode(compaction("fake-up"))
+			return
+		}
 		if !stream {
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "c1", "object": "chat.completion", "model": "fake-up",
 				"choices": []any{map[string]any{"index": 0, "finish_reason": "stop", "message": map[string]string{"role": "assistant", "content": "hi"}}},
@@ -181,8 +189,13 @@ func TestTheCallsTheServerMakes(t *testing.T) {
 		}
 	})
 	defer claude.Close()
-	// The Codex executor always streams from <base-url>/responses.
+	// The Codex executor always streams from <base-url>/responses, and posts a
+	// compaction to <base-url>/responses/compact, which answers whole.
 	codex := newFake(func(w http.ResponseWriter, r *http.Request, stream bool) {
+		if r.URL.Path == "/responses/compact" {
+			_ = json.NewEncoder(w).Encode(compaction("gpt-up"))
+			return
+		}
 		w.Header().Set("content-type", "text/event-stream")
 		item := `{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi","annotations":[]}]}`
 		fmt.Fprint(w, `data: {"type":"response.created","response":{"id":"r1","object":"response","status":"in_progress","model":"gpt-up","output":[]}}`+"\n\n")
@@ -358,60 +371,225 @@ plugins:
 			t.Fatalf("key hash %v", rec["key_hash"])
 		}
 	})
-	// Every key class against every login type. The requests carry their key
-	// in Authorization alone, so an allowed cell also proves the header is
-	// still there when the plugin's after-auth hook reads it.
+	// Every key class against every login type, on every route a client can
+	// reach a model by. The requests carry their key in Authorization, or in
+	// X-Goog-Api-Key on Gemini's routes, so an allowed cell also proves the
+	// header is still there when the plugin's after-auth hook reads it. A
+	// release that moves the hook off a route, or past the upstream call,
+	// goes red on that route's row.
 	t.Run("key_scope", func(t *testing.T) {
 		fakes := map[string]*fake{compatModel: compat, claudeModel: claude, codexModel: codex}
 		harness := map[string]string{ompKey: compatModel, claudeKey: claudeModel, codexKey: codexModel, sentinel: ""}
-		ask := func(key string, header map[string]string, model string) (int, string, map[string]int) {
-			before := map[string]int{}
+		counts := func() map[string]int {
+			n := map[string]int{}
 			for m, f := range fakes {
-				before[m] = f.count()
+				n[m] = f.count()
 			}
-			resp := call(t, "POST", base+"/v1/chat/completions", key, header, map[string]any{
-				"model": model, "messages": []map[string]string{{"role": "user", "content": "hi"}}})
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			return n
+		}
+		reachedSince := func(before map[string]int) map[string]int {
 			reached := map[string]int{}
 			for m, f := range fakes {
 				if n := f.count() - before[m]; n > 0 {
 					reached[m] = n
 				}
 			}
-			return resp.StatusCode, string(body), reached
+			return reached
 		}
-		check := func(name string, allowed bool, model string, status int, body string, reached map[string]int) {
-			var refusal struct {
-				Error struct{ Type, Message string }
+		namesAKey := func(body string) bool {
+			for _, key := range []string{ompKey, claudeKey, codexKey, sentinel} {
+				if strings.Contains(body, key) {
+					return true
+				}
 			}
-			_ = json.Unmarshal([]byte(body), &refusal)
-			switch {
-			case allowed && (status != http.StatusOK || len(reached) != 1 || reached[model] != 1):
-				t.Errorf("%s: want allowed, got %d %s, upstreams reached %v", name, status, body, reached)
-			case !allowed && (status != http.StatusForbidden || refusal.Error.Type != "key_scope" || len(reached) != 0):
-				t.Errorf("%s: want a key_scope 403 and no upstream call, got %d %s, upstreams reached %v", name, status, body, reached)
-			case !allowed && (strings.Contains(body, ompKey) || strings.Contains(body, claudeKey) || strings.Contains(body, codexKey) || strings.Contains(body, sentinel)):
-				t.Errorf("%s: the refusal names a key: %s", name, body)
-			}
-			verdict := "refused"
-			if allowed {
-				verdict = "allowed"
-			}
-			t.Logf("%-55s %-7s %d %s", name, verdict, status, strings.TrimSpace(body))
+			return false
 		}
-		for _, key := range []string{ompKey, claudeKey, codexKey, sentinel} {
-			for _, model := range []string{compatModel, claudeModel, codexModel} {
-				status, body, reached := ask(key, nil, model)
-				check(key+" -> "+model, harness[key] == model, model, status, body, reached)
+		short := func(body string) string {
+			body = strings.Join(strings.Fields(body), " ")
+			if len(body) > 110 {
+				body = body[:110] + "..."
+			}
+			return body
+		}
+		messages := []map[string]string{{"role": "user", "content": "hi"}}
+		contents := []any{map[string]any{"role": "user", "parts": []any{map[string]string{"text": "hi"}}}}
+		// local routes are answered by the proxy itself: for a login with a
+		// custom base URL upstream counts tokens locally (Claude's at
+		// internal/runtime/executor/claude_executor_tokens.go:27-32), so the
+		// fakes cannot serve them. Their allowed cells reach no upstream;
+		// their refusals still prove the hook runs.
+		routes := []struct {
+			name, path, header string
+			body               func(model string) map[string]any
+			local              bool
+		}{
+			{"POST /v1/chat/completions", "/v1/chat/completions", "",
+				func(m string) map[string]any { return map[string]any{"model": m, "messages": messages} }, false},
+			{"POST /v1/chat/completions stream", "/v1/chat/completions", "",
+				func(m string) map[string]any { return map[string]any{"model": m, "messages": messages, "stream": true} }, false},
+			{"POST /v1/completions", "/v1/completions", "",
+				func(m string) map[string]any { return map[string]any{"model": m, "prompt": "hi"} }, false},
+			{"POST /v1/messages", "/v1/messages", "",
+				func(m string) map[string]any {
+					return map[string]any{"model": m, "max_tokens": 16, "messages": messages}
+				}, false},
+			{"POST /v1/messages stream", "/v1/messages", "",
+				func(m string) map[string]any {
+					return map[string]any{"model": m, "max_tokens": 16, "messages": messages, "stream": true}
+				}, false},
+			{"POST /v1/messages/count_tokens", "/v1/messages/count_tokens", "",
+				func(m string) map[string]any { return map[string]any{"model": m, "messages": messages} }, true},
+			{"POST /v1/responses", "/v1/responses", "",
+				func(m string) map[string]any { return map[string]any{"model": m, "input": "hi"} }, false},
+			{"POST /v1/responses stream", "/v1/responses", "",
+				func(m string) map[string]any { return map[string]any{"model": m, "input": "hi", "stream": true} }, false},
+			{"POST /v1/responses/compact", "/v1/responses/compact", "",
+				func(m string) map[string]any { return map[string]any{"model": m, "input": "hi"} }, false},
+			{"POST /backend-api/codex/responses", "/backend-api/codex/responses", "",
+				func(m string) map[string]any { return map[string]any{"model": m, "input": "hi", "stream": true} }, false},
+			// There is no Gemini login: a Gemini route asking for another
+			// login's model is served by that login, so it is scoped by that
+			// login's harness.
+			{"POST /v1beta/models/<model>:generateContent", "/v1beta/models/<model>:generateContent", "X-Goog-Api-Key",
+				func(string) map[string]any { return map[string]any{"contents": contents} }, false},
+			{"POST /v1beta/models/<model>:countTokens", "/v1beta/models/<model>:countTokens", "X-Goog-Api-Key",
+				func(string) map[string]any { return map[string]any{"contents": contents} }, true},
+		}
+		for _, route := range routes {
+			for _, key := range []string{ompKey, claudeKey, codexKey, sentinel} {
+				for _, model := range []string{compatModel, claudeModel, codexModel} {
+					name := fmt.Sprintf("%-44s %-15s -> %s", route.name, key, model)
+					bearer, header := key, map[string]string(nil)
+					if route.header != "" {
+						bearer, header = "", map[string]string{route.header: key}
+					}
+					before := counts()
+					resp := call(t, "POST", base+strings.ReplaceAll(route.path, "<model>", model), bearer, header, route.body(model))
+					raw, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					status, body, reached := resp.StatusCode, string(raw), reachedSince(before)
+					var refusal struct {
+						Error struct{ Type, Message string }
+					}
+					_ = json.Unmarshal(raw, &refusal)
+					hits := 1
+					if route.local {
+						hits = 0
+					}
+					if harness[key] == model {
+						if status != http.StatusOK || len(reached) > 1 || reached[model] != hits {
+							t.Errorf("%s: want allowed with %d upstream call, got %d %s, upstreams reached %v", name, hits, status, short(body), reached)
+						}
+						t.Logf("%s allowed %d %s", name, status, short(body))
+						continue
+					}
+					if status != http.StatusForbidden || refusal.Error.Type != "key_scope" || len(reached) != 0 {
+						t.Errorf("%s: want a key_scope 403 and no upstream call, got %d %s, upstreams reached %v", name, status, short(body), reached)
+					} else if namesAKey(body) {
+						t.Errorf("%s: the refusal names a key: %s", name, body)
+					}
+					t.Logf("%s refused %d %s", name, status, strings.TrimSpace(body))
+				}
 			}
 		}
 		// The proxy takes the first configured key among the headers. A
 		// made-up Claude key in Authorization beside a valid omp key in
 		// X-Api-Key is an omp request: the host's caller scope says so.
 		for _, model := range []string{compatModel, claudeModel} {
-			status, body, reached := ask("claude_madeup", map[string]string{"X-Api-Key": ompKey}, model)
-			check("Bearer claude_madeup + X-Api-Key "+ompKey+" -> "+model, model == compatModel, model, status, body, reached)
+			before := counts()
+			resp := call(t, "POST", base+"/v1/chat/completions", "claude_madeup", map[string]string{"X-Api-Key": ompKey},
+				map[string]any{"model": model, "messages": messages})
+			raw, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			reached := reachedSince(before)
+			name := "Bearer claude_madeup + X-Api-Key " + ompKey + " -> " + model
+			switch {
+			case model == compatModel && (resp.StatusCode != http.StatusOK || reached[model] != 1 || len(reached) != 1):
+				t.Errorf("%s: want allowed, got %d %s, upstreams reached %v", name, resp.StatusCode, short(string(raw)), reached)
+			case model != compatModel && (resp.StatusCode != http.StatusForbidden || !bytes.Contains(raw, []byte(`"key_scope"`)) || len(reached) != 0):
+				t.Errorf("%s: want a key_scope 403 and no upstream call, got %d %s, upstreams reached %v", name, resp.StatusCode, short(string(raw)), reached)
+			}
+			t.Logf("%s %d %s", name, resp.StatusCode, short(string(raw)))
+		}
+
+		// GET /v1/responses is a websocket, its key checked once at the
+		// upgrade and its login chosen on every turn. Each cell is two turns:
+		// the same model twice, and, from a key's own model, a turn to
+		// another harness's. Upstream writes a 403 from the hook as no frame
+		// at all, only a closed socket
+		// (sdk/api/handlers/openai/openai_responses_websocket_forward.go:
+		// 398-410 and 459-470), so a refused turn is a close with no
+		// response frame, no upstream call and the plugin's refusal in the
+		// proxy's log. An error frame that says key_scope is taken too.
+		wsBase := "ws" + strings.TrimPrefix(base, "http") + "/v1/responses"
+		type wsCell struct {
+			key   string
+			turns [2]string
+		}
+		cells := []wsCell{}
+		for _, key := range []string{ompKey, claudeKey, codexKey, sentinel} {
+			for _, model := range []string{compatModel, claudeModel, codexModel} {
+				cells = append(cells, wsCell{key, [2]string{model, model}})
+			}
+		}
+		cells = append(cells, wsCell{ompKey, [2]string{compatModel, codexModel}},
+			wsCell{claudeKey, [2]string{claudeModel, compatModel}}, wsCell{codexKey, [2]string{codexModel, claudeModel}})
+		for _, cell := range cells {
+			conn, _, err := websocket.DefaultDialer.Dial(wsBase, http.Header{"Authorization": {"Bearer " + cell.key}})
+			if err != nil {
+				t.Errorf("ws %s: dial: %v", cell.key, err)
+				continue
+			}
+			for turn, model := range cell.turns {
+				name := fmt.Sprintf("%-44s %-15s -> %s", fmt.Sprintf("GET /v1/responses websocket, turn %d", turn+1), cell.key, model)
+				before, refusalsBefore := counts(), log.count("gentility-usage: refused request")
+				frame := map[string]any{"type": "response.create", "model": model, "input": []any{map[string]any{
+					"type": "message", "role": "user", "content": []any{map[string]string{"type": "input_text", "text": "hi"}}}}}
+				if err := conn.WriteJSON(frame); err != nil {
+					t.Errorf("%s: write: %v", name, err)
+					break
+				}
+				// Read to the turn's end: response.completed, an error frame
+				// or the socket closing.
+				_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+				var ended, closed string
+				for ended == "" && closed == "" {
+					_, msg, err := conn.ReadMessage()
+					if err != nil {
+						closed = err.Error()
+						break
+					}
+					var typed struct{ Type string }
+					_ = json.Unmarshal(msg, &typed)
+					if typed.Type == "response.completed" || typed.Type == "error" {
+						ended = string(msg)
+					} else if !strings.HasPrefix(typed.Type, "response.") {
+						ended = string(msg)
+					}
+				}
+				reached := reachedSince(before)
+				if harness[cell.key] == model {
+					if !strings.Contains(ended, `"response.completed"`) || len(reached) != 1 || reached[model] != 1 {
+						t.Errorf("%s: want allowed, got %q %s, upstreams reached %v", name, short(ended), closed, reached)
+					}
+					t.Logf("%s allowed %s", name, short(ended))
+					continue
+				}
+				until := time.Now().Add(2 * time.Second)
+				for log.count("gentility-usage: refused request") == refusalsBefore && time.Now().Before(until) {
+					time.Sleep(20 * time.Millisecond)
+				}
+				refusalLogged := log.count("gentility-usage: refused request") > refusalsBefore
+				keyScopeFrame := strings.Contains(ended, `"key_scope"`)
+				if (closed == "" && !keyScopeFrame) || strings.Contains(ended, `"response.`) || len(reached) != 0 || !refusalLogged || namesAKey(ended) {
+					t.Errorf("%s: want the socket refused with no upstream call, got frame %q, closed %q, upstreams reached %v, refusal logged %v",
+						name, short(ended), closed, reached, refusalLogged)
+				}
+				t.Logf("%s refused, %s", name, orElse(ended, closed))
+				// The proxy has closed the socket: there is no next turn.
+				break
+			}
+			conn.Close()
 		}
 		if !log.has("gentility-usage: refused request") {
 			t.Error("no refusal reached the proxy's log")
@@ -506,10 +684,19 @@ func (w *watched) Write(p []byte) (int, error) {
 	return w.out.Write(p)
 }
 
-func (w *watched) has(line string) bool {
+func (w *watched) has(line string) bool { return w.count(line) > 0 }
+
+func (w *watched) count(line string) int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return bytes.Contains(w.out.Bytes(), []byte(line))
+	return bytes.Count(w.out.Bytes(), []byte(line))
+}
+
+func orElse(s, otherwise string) string {
+	if s == "" {
+		return otherwise
+	}
+	return s
 }
 
 // fake is an upstream that counts the model requests reaching it.
@@ -534,6 +721,13 @@ func newFake(answer func(w http.ResponseWriter, r *http.Request, stream bool)) *
 		answer(w, r, asked.Stream)
 	}))
 	return f
+}
+
+// compaction is a /responses/compact answer.
+func compaction(model string) map[string]any {
+	return map[string]any{"id": "cmp1", "object": "response.compaction", "created_at": 1, "model": model,
+		"output": []any{map[string]string{"type": "compaction", "encrypted_content": "opaque"}},
+		"usage":  map[string]int{"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}}
 }
 
 func (f *fake) count() int {

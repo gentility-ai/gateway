@@ -42,8 +42,12 @@ that cannot decide, gets a `key_scope` 403 before any upstream call.
 `contract/` runs the real proxy release with the built plugin. It sends every
 management call the Gentility server makes, exactly as `contract/calls.json`
 lists them, plus one metered streamed completion. It sends every key class
-to every login type, each behind a fake upstream, and checks that only a
-key's own harness is served and that no refused request reaches an upstream.
+to every login type, each behind a fake upstream, on every route a client can
+reach a model by: chat and text completions, Claude's messages and
+count_tokens, Responses (plain, streamed, compact, Codex's own path and the
+two-turn websocket) and Gemini's generateContent and countTokens. It checks
+that only a key's own harness is served and that no refused request reaches
+an upstream.
 It checks that the record route refuses a missing or wrong management key. A release that answers any
 of those differently fails here, not in production.
 
