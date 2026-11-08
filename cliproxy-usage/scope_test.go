@@ -243,8 +243,10 @@ func TestKeyPrefixesAreTheContractsTable(t *testing.T) {
 	}
 }
 
-// The vector is upstream's session.CallerScope of the seeded key at v8.0.61.
-// The contract test proves it against each release's binary.
+// The vector is upstream's session.CallerScope of the seeded key. The function
+// is unchanged from v8.0.0 to v8.0.61, so it holds for go.mod's v8.0.60 and the
+// contract test's v8.0.61 alike; the contract test proves it against each
+// release's binary.
 func TestCallerScopeIsUpstreams(t *testing.T) {
 	const upstream = "e6e8f06a8778ae4dc17042ee8a71291dd00dfb1454f4397ad3e1e38ee583e169"
 	if callerScope(seededKey) != upstream || callerScope(" "+seededKey+" ") != upstream || callerScope("") != "" {
