@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "about": "The CLIProxyAPI management calls gentility-core's Gentility.Sessions.OmpGateway makes, and no others. A value in angle brackets is a placeholder: <key> a session key, <sentinel> the sentinel key, <management_key> the management key, <etag> the ETag the read answered with. A body is the JSON sent, with placeholders; null is no body.",
+  "about": "The CLIProxyAPI calls gentility-core's Gentility.Sessions.OmpGateway makes, and no others. scope_canary must be refused 403 key_scope: it proves the plugin's key scope is live, and its model must be one an openai-compatibility login serves. A value in angle brackets is a placeholder: <key> a session key, <sentinel> the sentinel key, <management_key> the management key, <etag> the ETag the read answered with. A body is the JSON sent, with placeholders; null is no body.",
   "calls": [
     {
       "name": "add_key",
@@ -56,6 +56,18 @@
         "authorization": "Bearer <key>"
       },
       "body": null
+    },
+    {
+      "name": "scope_canary",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "query": {},
+      "headers": {
+        "accept": "application/json",
+        "authorization": "Bearer <sentinel>",
+        "content-type": "application/json"
+      },
+      "body": {"model": "glm-5.3-flash", "max_tokens": 1, "messages": [{"role": "user", "content": "."}]}
     },
     {
       "name": "read_quota",

@@ -599,6 +599,26 @@ plugins:
 			t.Error("no refusal reached the proxy's log")
 		}
 	})
+	// The server's canary: the sentinel, unprefixed, asking for a model an
+	// openai-compatibility login serves. A live key scope refuses it before
+	// any upstream call; anything else means the scope is not enforced.
+	t.Run("scope_canary", func(t *testing.T) {
+		before := compat.count()
+		resp := server("scope_canary", map[string]string{})
+		var refused struct{ Error struct{ Type string } }
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		_ = json.Unmarshal(body, &refused)
+		if resp.StatusCode != http.StatusForbidden || refused.Error.Type != "key_scope" {
+			t.Fatalf("the canary answered %d %s, want 403 key_scope", resp.StatusCode, body)
+		}
+		if bytes.Contains(body, []byte(sentinel)) {
+			t.Fatal("the canary's refusal names the sentinel")
+		}
+		if n := compat.count() - before; n != 0 {
+			t.Fatalf("the canary reached the upstream %d times", n)
+		}
+	})
 	t.Run("quota_provider", func(t *testing.T) {
 		resp := call(t, "GET", base+"/v0/management/quota/providers", "", mgmt, nil)
 		var listed struct {
