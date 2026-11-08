@@ -91,7 +91,9 @@ jobs:
           m=$(cat manifest.json)
           tar -cf bundle.tar manifest.json manifest.sig "$(jq -r .upstream.archive <<<"$m")" "$(jq -r .plugin.file <<<"$m")"
           jq -r '"Bundle \(.bundle): CLIProxyAPI \(.upstream.version) (sha256 \(.upstream.sha256)) with gentility-usage \(.plugin.version) (\(.plugin.commit)).\n\nLines marked ⚑ touch what the gateway depends on.\n" + ([.changelog[] | "### \(.version)\n\n" + ([.lines[] | "- " + (if .flagged then "⚑ " else "" end) + .text] | join("\n"))] | join("\n\n"))' manifest.json > notes.md
+      # GitHub stores provenance only for public repositories on this plan.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: ${{ !github.event.repository.private }}
         with:
           subject-path: dist/bundle.tar
       - name: Publish
