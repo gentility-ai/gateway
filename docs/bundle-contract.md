@@ -204,3 +204,12 @@ test fails when its calls differ from the copy. Today's calls:
 | GET | `/v8/management/config/access/api-keys` | answers with an `ETag` |
 | PUT | `/v8/management/config/access/api-keys` | `If-Match: <etag>`, body is the list; a 412 means a stale read, so read again |
 | GET | `/v1/models` | `Authorization: Bearer k`; a 200 means the key is accepted |
+
+## The key prefixes
+
+`contract/key_prefixes.json` maps the prefix of every client key the server
+mints (`omp_`, `claude_`, `codex_`) to the harness it names. From plugin
+0.5.0 the plugin refuses, with a `key_scope` 403 before any upstream call, a
+request whose key's harness is not the harness of the login serving it; an
+unprefixed key gets no inference. The server pins a copy of the file, and a
+plugin test holds the plugin's table to it.

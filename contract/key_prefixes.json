@@ -1,0 +1,9 @@
+{
+  "format": 1,
+  "about": "The prefix of every client key the Gentility server mints for the gateway, and the harness it names. The gentility-usage plugin refuses a request whose key's harness is not the harness of the login serving it; a key with no prefix listed here gets no inference. gentility-core's Gentility.Sessions.OmpKeys mints the prefixes; this file is pinned in both repositories.",
+  "prefixes": {
+    "omp_": "omp",
+    "claude_": "claude",
+    "codex_": "codex"
+  }
+}
