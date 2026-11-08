@@ -136,28 +136,20 @@ func bearer(header string) string {
 // X-Goog-Api-Key, X-Api-Key and two query parameters, so a request can carry
 // a valid key in one place and any string in another. The host's caller
 // scope names the one that matched; a request whose scope matches no header
-// (its key came in the query) has no key here. Without a scope, every header
-// that carries a key must agree on its harness.
+// (its key came in the query) has no key here. Without a scope there is no
+// telling which key the proxy accepted: a valid key in the query and a
+// made-up one in a header would read as the made-up one's harness, so a
+// request with no scope has no key either.
 func clientKey(headers http.Header, scope string) (key string, found bool) {
-	candidates := []string{bearer(headers.Get("Authorization")), headers.Get("X-Goog-Api-Key"), headers.Get("X-Api-Key")}
-	if scope != "" {
-		for _, c := range candidates {
-			if c != "" && callerScope(c) == scope {
-				return c, true
-			}
-		}
+	if scope == "" {
 		return "", false
 	}
-	for _, c := range candidates {
-		if c == "" {
-			continue
+	for _, c := range []string{bearer(headers.Get("Authorization")), headers.Get("X-Goog-Api-Key"), headers.Get("X-Api-Key")} {
+		if c != "" && callerScope(c) == scope {
+			return c, true
 		}
-		if found && keyHarness(c) != keyHarness(key) {
-			return "", false
-		}
-		key, found = c, true
 	}
-	return key, found
+	return "", false
 }
 
 // keyHarness names the harness a key's prefix marks, or "" for none. No
@@ -268,8 +260,8 @@ func refusal(v verdict) json.RawMessage {
 	}
 	body, _ := json.Marshal(map[string]any{"error": map[string]string{
 		"type": "key_scope",
-		"message": fmt.Sprintf("this gateway key is for %s; %s is served by a %s login",
-			orNone(v.key, "no harness"), model, orNone(v.login, "unscoped")),
+		"message": fmt.Sprintf("this gateway key is for %s; %s is served by a login for %s",
+			orNone(v.key, "no harness"), model, orNone(v.login, "no harness")),
 	}})
 	raw, _ := json.Marshal(pluginapi.RequestInterceptResponse{Terminate: true, StatusCode: http.StatusForbidden,
 		ResponseHeaders: http.Header{"Content-Type": {"application/json"}}, ResponseBody: body})

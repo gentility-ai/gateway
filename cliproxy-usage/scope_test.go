@@ -196,7 +196,7 @@ func TestAKeyReachesOnlyItsOwnHarnesssLogins(t *testing.T) {
 				allowed(t, resp)
 			} else {
 				r.refused(t, resp, "another harness's login")
-				want := "this gateway key is for " + keyHarness(key) + "; asked-model is served by a " + harness + " login"
+				want := "this gateway key is for " + keyHarness(key) + "; asked-model is served by a login for " + harness
 				if !bytes.Contains(resp.ResponseBody, []byte(want)) {
 					t.Fatalf("%s at %s: body %s", key, index, resp.ResponseBody)
 				}
@@ -220,7 +220,7 @@ func TestAnUnprefixedKeyIsRefused(t *testing.T) {
 	r := newScopeRig(t)
 	resp := send(t, keyed("contract-sentinel", "zai").raw())
 	r.refused(t, resp, "a key with no known prefix")
-	if !bytes.Contains(resp.ResponseBody, []byte("this gateway key is for no harness; asked-model is served by a omp login")) {
+	if !bytes.Contains(resp.ResponseBody, []byte("this gateway key is for no harness; asked-model is served by a login for omp")) {
 		t.Fatalf("body %s", resp.ResponseBody)
 	}
 }
@@ -237,7 +237,7 @@ func TestALoginListTheHostCannotGiveIsRefused(t *testing.T) {
 	r.host.fail = true
 	resp := send(t, keyed("omp_k", "zai").raw())
 	r.refused(t, resp, "the host did not list its logins")
-	if !bytes.Contains(resp.ResponseBody, []byte("served by a unscoped login")) {
+	if !bytes.Contains(resp.ResponseBody, []byte("served by a login for no harness")) {
 		t.Fatalf("body %s", resp.ResponseBody)
 	}
 }
@@ -289,12 +289,15 @@ func TestTheKeyThatAuthenticatedDecidesNotTheFirstHeader(t *testing.T) {
 	query.scope = callerScope("omp_k")
 	r.refused(t, send(t, query.raw()), "no key")
 
-	// Without a scope, every header that carries a key must agree.
+	// Without a scope there is no telling which key the proxy accepted: an
+	// omp key in the query and a made-up Claude one in Authorization would
+	// read as Claude. So no scope is no key, even when the headers agree.
 	r.logs.Reset()
-	unscoped := asked{headers: mixed.headers, index: "claude-oauth"}
+	unscoped := asked{headers: http.Header{"Authorization": {"Bearer claude_madeup"}}, index: "claude-oauth"}
 	r.refused(t, send(t, unscoped.raw()), "no key")
-	agreeing := asked{headers: http.Header{"Authorization": {"Bearer omp_a"}, "X-Goog-Api-Key": {"omp_b"}}, index: "zai"}
-	allowed(t, send(t, agreeing.raw()))
+	r.logs.Reset()
+	agreeing := asked{headers: http.Header{"Authorization": {"Bearer omp_a"}, "X-Goog-Api-Key": {"omp_a"}}, index: "zai"}
+	r.refused(t, send(t, agreeing.raw()), "no key")
 }
 
 func TestTheOtherKeyHeadersCarryAKey(t *testing.T) {
