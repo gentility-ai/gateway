@@ -85,6 +85,10 @@ const quotaDescription = `{"supported_providers":["codex","claude"],"display_nam
 // with one would become an unauthenticated resource.
 const managementRoutes = `{"routes":[{"Method":"GET","Path":"/gentility-usage/record"}]}`
 
+// Set only in a rollback-test bundle (scripts/build with ROLLBACK_TEST): its
+// plugin refuses to register, so a move to it must roll back.
+var refuse string
+
 var (
 	start    sync.Once
 	startErr error
@@ -200,6 +204,9 @@ func begin() error {
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+		if refuse != "" {
+			return errorEnvelope("rollback_test", "this build refuses to register: it tests the gateway's rollback"), nil
+		}
 		if err := begin(); err != nil {
 			return errorEnvelope("metering_unconfigured", err.Error()), nil
 		}

@@ -5,6 +5,7 @@
 #
 #   scripts/build            # upstream's latest release
 #   scripts/build 8.0.60     # a given one
+#   ROLLBACK_TEST=1 scripts/build   # a bundle a move to must roll back
 #
 # Prints "skip" and exits 0 when that bundle is already published, unless
 # FORCE is set (CI builds every change, published or not). Runs the
@@ -20,6 +21,15 @@ out() { [ -n "${GITHUB_OUTPUT:-}" ] && echo "$1=$2" >> "$GITHUB_OUTPUT"; true; }
 version=${1:-$(gh release view -R "$upstream" --json tagName --jq .tagName)}
 version=${version#v}
 plugin=$(grep -o '"Version":"[^"]*"' "$root/cliproxy-usage/main.go" | head -1 | cut -d'"' -f4)
+# A rollback-test bundle's plugin refuses to register. Its version sits just
+# above the real one, so the servers card offers it, and its name is one no
+# real build takes. It skips the contract test, which it is built to fail.
+ldflags=
+if [ -n "${ROLLBACK_TEST:-}" ]; then
+  IFS=. read -r major minor patch <<<"$plugin"
+  plugin="$major.$minor.$((patch + 1))-rollback-test"
+  ldflags="-X main.refuse=rollback-test"
+fi
 bundle="$version-$plugin"
 out bundle "$bundle"
 
@@ -49,10 +59,12 @@ cp "$scratch/$archive" "$dist/"
   go get "github.com/router-for-me/CLIProxyAPI/v8@v$version" &&
   go mod tidy &&
   go vet ./... && go test -count=1 ./... &&
-  CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o "$dist/gentility-usage.so" . &&
+  CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -ldflags "$ldflags" -o "$dist/gentility-usage.so" . &&
   rm -f "$dist/gentility-usage.h")
 
-if [ "$(uname -s)" = Linux ]; then
+if [ -n "${ROLLBACK_TEST:-}" ]; then
+  echo "rollback test: no contract test, the plugin is built not to register" >&2
+elif [ "$(uname -s)" = Linux ]; then
   mkdir "$scratch/proxy" && tar -xzf "$dist/$archive" -C "$scratch/proxy"
   (cd "$root/contract" &&
     CLIPROXY_BIN="$scratch/proxy/cli-proxy-api" USAGE_PLUGIN="$dist/gentility-usage.so" \
