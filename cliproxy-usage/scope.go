@@ -17,10 +17,10 @@ import (
 )
 
 // keyPrefixes is contract/key_prefixes.json: the prefix the Gentility server
-// mints on every gateway key, and the harness it names. The proxy matches a
+// mints or admits on every gateway key, and the harness it names. The proxy matches a
 // key exactly, so a client cannot change its key's prefix without holding a
 // valid key of that harness. A test holds this table to the file.
-var keyPrefixes = map[string]string{"omp_": "omp", "claude_": "claude", "codex_": "codex"}
+var keyPrefixes = map[string]string{"omp_": "omp", "claude_": "claude", "codex_": "codex", "rk_live_": "omp", "rk_test_": "omp"}
 
 // The host's login list is trusted for a minute. A login file's auth_index
 // comes from its path, not its provider, so a path can come to hold another

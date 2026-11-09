@@ -25,11 +25,12 @@ const management = "contract-management-key"
 const sentinel = "contract-sentinel"
 
 // A key's prefix names its harness (key_prefixes.json). The omp key is added
-// and deleted through the server's calls; the other two are in the config.
+// and deleted through the server's calls; the other three are in the config.
 const (
 	ompKey    = "omp_k1"
 	claudeKey = "claude_contract"
 	codexKey  = "codex_contract"
+	rkKey     = "rk_live_contract"
 )
 
 const (
@@ -238,7 +239,7 @@ management:
   allow-remote: false
   secret-key: %q
 access:
-  api-keys: [%q, %q, %q]
+  api-keys: [%q, %q, %q, %q]
 openai-compatibility:
   - name: fake
     base-url: %q
@@ -265,7 +266,7 @@ plugins:
   configs:
     gentility-usage:
       enabled: true
-`, port, filepath.Join(dir, "auths"), management, sentinel, claudeKey, codexKey, compat.URL+"/v1",
+`, port, filepath.Join(dir, "auths"), management, sentinel, claudeKey, codexKey, rkKey, compat.URL+"/v1",
 		claude.URL, claudeModel, codex.URL, codexModel, pluginDir)
 	configPath := filepath.Join(dir, "config.yaml")
 	_ = os.WriteFile(configPath, []byte(config), 0o600)
@@ -379,7 +380,7 @@ plugins:
 	// goes red on that route's row.
 	t.Run("key_scope", func(t *testing.T) {
 		fakes := map[string]*fake{compatModel: compat, claudeModel: claude, codexModel: codex}
-		harness := map[string]string{ompKey: compatModel, claudeKey: claudeModel, codexKey: codexModel, sentinel: ""}
+		harness := map[string]string{ompKey: compatModel, claudeKey: claudeModel, codexKey: codexModel, rkKey: compatModel, sentinel: ""}
 		counts := func() map[string]int {
 			n := map[string]int{}
 			for m, f := range fakes {
@@ -397,7 +398,7 @@ plugins:
 			return reached
 		}
 		namesAKey := func(body string) bool {
-			for _, key := range []string{ompKey, claudeKey, codexKey, sentinel} {
+			for _, key := range []string{ompKey, claudeKey, codexKey, rkKey, sentinel} {
 				if strings.Contains(body, key) {
 					return true
 				}
@@ -458,7 +459,7 @@ plugins:
 				func(string) map[string]any { return map[string]any{"contents": contents} }, true},
 		}
 		for _, route := range routes {
-			for _, key := range []string{ompKey, claudeKey, codexKey, sentinel} {
+			for _, key := range []string{ompKey, claudeKey, codexKey, rkKey, sentinel} {
 				for _, model := range []string{compatModel, claudeModel, codexModel} {
 					name := fmt.Sprintf("%-44s %-15s -> %s", route.name, key, model)
 					bearer, header := key, map[string]string(nil)
@@ -529,7 +530,7 @@ plugins:
 		}
 		cells := []wsCell{}
 		for _, path := range []string{"/v1/responses", "/backend-api/codex/responses"} {
-			for _, key := range []string{ompKey, claudeKey, codexKey, sentinel} {
+			for _, key := range []string{ompKey, claudeKey, codexKey, rkKey, sentinel} {
 				for _, model := range []string{compatModel, claudeModel, codexModel} {
 					cells = append(cells, wsCell{path, key, [2]string{model, model}})
 				}

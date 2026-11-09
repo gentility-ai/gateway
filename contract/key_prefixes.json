@@ -1,9 +1,11 @@
 {
   "format": 1,
-  "about": "The prefix of every client key the Gentility server mints for the gateway, and the harness it names. The gentility-usage plugin refuses a request whose key's harness is not the harness of the login serving it; a key with no prefix listed here gets no inference. gentility-core's Gentility.Sessions.OmpKeys mints the prefixes; this file is pinned in both repositories.",
+  "about": "The prefix of every client key the Gentility server mints for the gateway, and the harness it names. The gentility-usage plugin refuses a request whose key's harness is not the harness of the login serving it; a key with no prefix listed here gets no inference. gentility-core's Gentility.Sessions.OmpKeys mints the session prefixes, and an organization's API keys (rk_live_, rk_test_), admitted by gentility-core's Gentility.Inference.Admissions, are served by the omp logins; this file is pinned in both repositories.",
   "prefixes": {
     "omp_": "omp",
     "claude_": "claude",
-    "codex_": "codex"
+    "codex_": "codex",
+    "rk_live_": "omp",
+    "rk_test_": "omp"
   }
 }
