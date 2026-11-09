@@ -15,6 +15,10 @@ on:
       version:
         description: "Upstream version, e.g. 8.0.60; empty for the latest"
         default: ""
+      rollback_test:
+        description: "A bundle whose plugin refuses to register, to prove a move rolls back"
+        type: boolean
+        default: false
 
 concurrency:
   group: release
@@ -41,6 +45,7 @@ jobs:
       - id: build
         env:
           GH_TOKEN: ${{ github.token }}
+          ROLLBACK_TEST: ${{ inputs.rollback_test && '1' || '' }}
         run: scripts/build "${{ inputs.version }}"
       - if: steps.build.outputs.skip == 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -100,7 +105,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BUNDLE: ${{ needs.build.outputs.bundle }}
+          ROLLBACK_TEST: ${{ inputs.rollback_test && '1' || '' }}
         run: |
           cd dist
-          gh release create "gateway-$BUNDLE" bundle.tar manifest.json manifest.sig \
+          test=()
+          if [ -n "$ROLLBACK_TEST" ]; then
+            test=(--prerelease --latest=false)
+            sed -i '1i A rollback test: its plugin refuses to register, so a move to it rolls back. Delete this release once the test is done.\n' notes.md
+          fi
+          gh release create "gateway-$BUNDLE" bundle.tar manifest.json manifest.sig "${test[@]}" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "gateway $BUNDLE" --notes-file notes.md
