@@ -75,7 +75,7 @@ import (
 // login chosen for a request and refuses a key of another harness, the
 // response hooks carry its quota headers. Schema 8
 // leaves request bodies off all of them, and history off stream chunks.
-const registration = `{"schema_version":8,"metadata":{"Name":"gentility-usage","Version":"0.6.0","Author":"Gentility","GitHubRepository":"https://github.com/gentility-ai/gateway","Logo":"","ConfigFields":[]},"capabilities":{"usage_plugin":true,"quota_provider":true,"management_api":true,"request_interceptor":true,"request_interceptor_omit_body_before":true,"request_interceptor_omit_body_after":true,"response_interceptor":true,"response_stream_interceptor":true}}`
+const registration = `{"schema_version":8,"metadata":{"Name":"gentility-usage","Version":"0.7.0","Author":"Gentility","GitHubRepository":"https://github.com/gentility-ai/gateway","Logo":"","ConfigFields":[]},"capabilities":{"usage_plugin":true,"quota_provider":true,"management_api":true,"request_interceptor":true,"request_interceptor_omit_body_before":true,"request_interceptor_omit_body_after":true,"response_interceptor":true,"response_stream_interceptor":true}}`
 
 const quotaDescription = `{"supported_providers":["codex","claude"],"display_name":"Gentility quota watch"}`
 

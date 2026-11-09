@@ -259,7 +259,7 @@ func TestCallerScopeIsUpstreams(t *testing.T) {
 func TestAKeyReachesOnlyItsOwnHarnesssLogins(t *testing.T) {
 	logins := map[string]string{"claude-oauth": "claude", "claude-key": "claude", "codex-oauth": "codex",
 		"codex-key": "codex", "zai": "omp", "unnamed": "omp"}
-	for _, key := range []string{"omp_k", "claude_k", "codex_k"} {
+	for _, key := range []string{"omp_k", "claude_k", "codex_k", "rk_live_k", "rk_test_k"} {
 		for index, harness := range logins {
 			r := newScopeRig(t)
 			resp := send(t, keyed(key, index).raw())

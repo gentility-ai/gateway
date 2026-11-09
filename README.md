@@ -51,7 +51,8 @@ the record, its file or the log; a test seeds fake ones to prove it.
 From plugin 0.5.0 it also **scopes keys**. The prefix of a client key names
 its harness (`contract/key_prefixes.json`); a request is served only by a
 login of that harness: `claude` logins for `claude_` keys, `codex` logins
-for `codex_` keys, openai-compatibility logins for `omp_` keys. Anything
+for `codex_` keys, openai-compatibility logins for `omp_`, `rk_live_` and
+`rk_test_` keys. Anything
 else, including a key with no prefix, a login of another provider or a check
 that cannot decide, gets a `key_scope` 403 before any upstream call. On the
 Responses websocket upstream drops the 403's body and closes the socket.
