@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,12 +51,19 @@ type watcher struct {
 	// request waits on a disk.
 	saving sync.Mutex
 	file   string
+	// refKey makes each login's ref; nil leaves every login without one.
+	refKey []byte
 	client *http.Client
 	now    func() time.Time
 }
 
 func newWatcher(file string) *watcher {
 	w := &watcher{logins: map[string]*login{}, serving: map[string]serving{}, file: file, client: &http.Client{Timeout: 20 * time.Second}, now: time.Now}
+	key, err := loadRefKey(filepath.Join(filepath.Dir(file), refKeyFile))
+	if err != nil {
+		log.Printf("gentility-quota: no login_ref key, so no login carries a login_ref: %v", err)
+	}
+	w.refKey = key
 	raw, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return w
@@ -101,6 +109,7 @@ type credential struct {
 	AccessToken string `json:"access_token"`
 	IDToken     string `json:"id_token"`
 	AccountID   string `json:"account_id"`
+	AccountUUID string `json:"account_uuid"`
 	LastRefresh string `json:"last_refresh"`
 }
 
@@ -162,6 +171,9 @@ func (w *watcher) sweep(ctx context.Context) {
 		cred, err := readCredential(h.AuthIndex)
 		w.mu.Lock()
 		l := w.logins[h.AuthIndex]
+		if l != nil && err == nil {
+			w.name(l, cred)
+		}
 		ready := l != nil && l.ready(w.now(), cred.LastRefresh)
 		w.mu.Unlock()
 		if !ready {
@@ -179,6 +191,18 @@ func (w *watcher) sweep(ctx context.Context) {
 		w.mu.Unlock()
 	}
 	w.save()
+}
+
+// name sets a login's ref from the file it was just read from, so a login
+// signed in again as another account takes that account's ref.
+func (w *watcher) name(l *login, cred credential) {
+	ref := loginRef(w.refKey, l.Provider, accountID(l.Provider, cred))
+	if ref == "" && w.refKey != nil {
+		log.Printf("gentility-quota: %s login %s names no account, so it has no login_ref", l.Provider, l.AuthIndex)
+	}
+	if ref != l.LoginRef {
+		l.LoginRef, w.dirty = ref, true
+	}
 }
 
 // due reports whether a login's next poll has come, and a minute has passed

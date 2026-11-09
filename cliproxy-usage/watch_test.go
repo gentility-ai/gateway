@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -35,6 +36,11 @@ type fakeHost struct {
 	// refuseGet makes host.auth.get fail the way upstream's file store does,
 	// naming the login file.
 	refuseGet bool
+	// codexIndex, when set, lists the Codex login under another auth_index.
+	codexIndex string
+	// account, when set, is the account every login file signs in as; "-"
+	// leaves the account out of the files.
+	account string
 }
 
 func (f *fakeHost) call(method string, request []byte) ([]byte, error) {
@@ -47,7 +53,11 @@ func (f *fakeHost) call(method string, request []byte) ([]byte, error) {
 			return map[string]any{"auth_index": index, "provider": provider, "email": seededEmail, "account": seededAccount,
 				"updated_at": time.Now()}
 		}
-		result = map[string]any{"files": []any{entry("cx1", "codex"), entry("cl1", "claude"), entry("k1", "openai-compatibility")}}
+		codexIndex := f.codexIndex
+		if codexIndex == "" {
+			codexIndex = "cx1"
+		}
+		result = map[string]any{"files": []any{entry(codexIndex, "codex"), entry("cl1", "claude"), entry("k1", "openai-compatibility")}}
 	case pluginabi.MethodHostAuthGet:
 		if f.refuseGet {
 			return json.Marshal(pluginabi.Envelope{Error: &pluginabi.Error{Code: "host_call_failed",
@@ -57,10 +67,18 @@ func (f *fakeHost) call(method string, request []byte) ([]byte, error) {
 			AuthIndex string `json:"auth_index"`
 		}
 		_ = json.Unmarshal(request, &asked)
-		claims, _ := json.Marshal(map[string]any{"email": seededEmail, "https://api.openai.com/auth": map[string]string{"chatgpt_account_id": seededAccount}})
+		account := f.account
+		switch account {
+		case "":
+			account = seededAccount
+		case "-":
+			account = ""
+		}
+		claims, _ := json.Marshal(map[string]any{"email": seededEmail, "https://api.openai.com/auth": map[string]string{"chatgpt_account_id": account}})
 		idToken := "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + ".sig"
 		file, _ := json.Marshal(map[string]string{"access_token": seededToken, "refresh_token": "refresh-" + seededToken,
-			"id_token": idToken, "account_id": seededAccount, "email": seededEmail, "last_refresh": f.lastRefresh.Format(time.RFC3339)})
+			"id_token": idToken, "account_id": account, "account_uuid": account, "email": seededEmail,
+			"last_refresh": f.lastRefresh.Format(time.RFC3339)})
 		result = map[string]any{"auth_index": asked.AuthIndex, "json": json.RawMessage(file)}
 	default:
 		return nil, nil
@@ -330,7 +348,7 @@ func TestNoSecretReachesTheRecordTheFileOrTheLog(t *testing.T) {
 		t.Fatalf("file %v, log %q: the test exercised neither", err, r.logs)
 	}
 	for name, got := range map[string][]byte{"record": record, "quota route": fetched, "file": file, "log": r.logs.Bytes()} {
-		for _, secret := range []string{seededToken, seededAccount, seededEmail} {
+		for _, secret := range []string{seededToken, seededAccount, seededEmail, string(r.w.refKey), hex.EncodeToString(r.w.refKey)} {
 			if bytes.Contains(got, []byte(secret)) {
 				t.Fatalf("the %s holds %q:\n%s", name, secret, got)
 			}
