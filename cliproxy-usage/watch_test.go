@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -22,7 +23,12 @@ import (
 const (
 	seededToken   = "tok-SEEDED-bearer"
 	seededAccount = "acct-SEEDED-0001"
-	seededEmail   = "seeded@example.com"
+	// The Codex file's own account_id, the id_token's user, and the Claude
+	// file's account_uuid: each its own value, so a test sees which is read.
+	seededFileAccount   = "acct-SEEDED-FILE-0002"
+	seededUser          = "user-SEEDED-0003"
+	seededClaudeAccount = "uuid-SEEDED-0004"
+	seededEmail         = "seeded@example.com"
 )
 
 var refreshed = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
@@ -35,6 +41,24 @@ type fakeHost struct {
 	// refuseGet makes host.auth.get fail the way upstream's file store does,
 	// naming the login file.
 	refuseGet bool
+	// codexIndex, when set, lists the Codex login under another auth_index.
+	codexIndex string
+	// Each set field replaces its seeded value in the login files; "-"
+	// leaves it out. account and user are the Codex id_token's claims,
+	// fileAccount the Codex file's account_id, claudeAccount the Claude
+	// file's account_uuid.
+	account, user, fileAccount, claudeAccount string
+}
+
+// seeded is a fake host field's value: the seed when unset, none for "-".
+func seeded(value, seed string) string {
+	switch value {
+	case "":
+		return seed
+	case "-":
+		return ""
+	}
+	return value
 }
 
 func (f *fakeHost) call(method string, request []byte) ([]byte, error) {
@@ -47,7 +71,11 @@ func (f *fakeHost) call(method string, request []byte) ([]byte, error) {
 			return map[string]any{"auth_index": index, "provider": provider, "email": seededEmail, "account": seededAccount,
 				"updated_at": time.Now()}
 		}
-		result = map[string]any{"files": []any{entry("cx1", "codex"), entry("cl1", "claude"), entry("k1", "openai-compatibility")}}
+		codexIndex := f.codexIndex
+		if codexIndex == "" {
+			codexIndex = "cx1"
+		}
+		result = map[string]any{"files": []any{entry(codexIndex, "codex"), entry("cl1", "claude"), entry("k1", "openai-compatibility")}}
 	case pluginabi.MethodHostAuthGet:
 		if f.refuseGet {
 			return json.Marshal(pluginabi.Envelope{Error: &pluginabi.Error{Code: "host_call_failed",
@@ -57,10 +85,14 @@ func (f *fakeHost) call(method string, request []byte) ([]byte, error) {
 			AuthIndex string `json:"auth_index"`
 		}
 		_ = json.Unmarshal(request, &asked)
-		claims, _ := json.Marshal(map[string]any{"email": seededEmail, "https://api.openai.com/auth": map[string]string{"chatgpt_account_id": seededAccount}})
+		account := seeded(f.account, seededAccount)
+		claims, _ := json.Marshal(map[string]any{"email": seededEmail, "sub": "auth0|" + seeded(f.user, seededUser),
+			"https://api.openai.com/auth": map[string]string{"chatgpt_account_id": account, "chatgpt_user_id": seeded(f.user, seededUser)}})
 		idToken := "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + ".sig"
 		file, _ := json.Marshal(map[string]string{"access_token": seededToken, "refresh_token": "refresh-" + seededToken,
-			"id_token": idToken, "account_id": seededAccount, "email": seededEmail, "last_refresh": f.lastRefresh.Format(time.RFC3339)})
+			"id_token": idToken, "account_id": seeded(f.fileAccount, seededFileAccount),
+			"account_uuid": seeded(f.claudeAccount, seededClaudeAccount), "email": seededEmail,
+			"last_refresh": f.lastRefresh.Format(time.RFC3339)})
 		result = map[string]any{"auth_index": asked.AuthIndex, "json": json.RawMessage(file)}
 	default:
 		return nil, nil
@@ -330,7 +362,8 @@ func TestNoSecretReachesTheRecordTheFileOrTheLog(t *testing.T) {
 		t.Fatalf("file %v, log %q: the test exercised neither", err, r.logs)
 	}
 	for name, got := range map[string][]byte{"record": record, "quota route": fetched, "file": file, "log": r.logs.Bytes()} {
-		for _, secret := range []string{seededToken, seededAccount, seededEmail} {
+		for _, secret := range []string{seededToken, seededAccount, seededFileAccount, seededUser, seededClaudeAccount, seededEmail,
+			string(r.w.refKey), hex.EncodeToString(r.w.refKey)} {
 			if bytes.Contains(got, []byte(secret)) {
 				t.Fatalf("the %s holds %q:\n%s", name, secret, got)
 			}

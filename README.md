@@ -27,8 +27,26 @@ built against the same release through the plugin ABI.
     `GET /v0/management/gentility-usage/record` (from plugin 0.4.0). Both
     take the management key.
 
-No bearer, refresh token, id token, account id or email reaches the record,
-its file or the log; a test seeds fake ones to prove it.
+From plugin 0.6.0 each login in the record carries a **`login_ref`**, so the
+server can tell its logins apart over time: two on one plan, or one whose
+`auth_index` moved when the set of logins changed. It is HMAC-SHA256 over the
+provider and who the login signs in as, under a key that never leaves the
+node. For Codex that is the ChatGPT account (`chatgpt_account_id`) and the
+user within it (`chatgpt_user_id`), since every seat of a Team plan shares
+the account. For Claude it is `account_uuid`; where Anthropic's profile does
+not answer, upstream makes that up from the login file, and the ref then
+names the file. The key:
+- the plugin makes the key itself on its first start: 32 random bytes in
+  `gentility-quota-ref.key`, beside the quota record, readable by the proxy's
+  user only;
+- **deleting that file rotates the key, and every login starts a new ref**:
+  the server's history of each login begins again under the new one. A move
+  to another node does the same unless the file goes with it;
+- a login whose file names no account, or any login while the key cannot be
+  read or made, has no ref, and the log says why. Metering and polling go on.
+
+No bearer, refresh token, id token, account id, email or the ref key reaches
+the record, its file or the log; a test seeds fake ones to prove it.
 
 From plugin 0.5.0 it also **scopes keys**. The prefix of a client key names
 its harness (`contract/key_prefixes.json`); a request is served only by a

@@ -10,15 +10,21 @@ import (
 )
 
 // login is the quota record of one Codex or Claude login. It names the login
-// by auth_index and plan only: no token, account id or email is ever kept.
+// by auth_index, plan and login_ref only: no token, account id or email is
+// ever kept. LoginRef (ref.go) is empty until the login's file has been read
+// with a key in hand and an account id in it.
 type login struct {
 	AuthIndex string   `json:"auth_index"`
+	LoginRef  string   `json:"login_ref,omitempty"`
 	Provider  string   `json:"provider"`
 	Plan      string   `json:"plan,omitempty"`
 	Windows   []window `json:"windows"`
 	Resets    *int     `json:"resets,omitempty"`
 	Credits   *credits `json:"credits,omitempty"`
 	Poll      poll     `json:"poll"`
+	// unnamed is set once the missing account has been logged, so it is
+	// logged once per login, not on every poll.
+	unnamed bool
 }
 
 type window struct {

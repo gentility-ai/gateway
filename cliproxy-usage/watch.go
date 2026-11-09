@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,12 +52,19 @@ type watcher struct {
 	// request waits on a disk.
 	saving sync.Mutex
 	file   string
+	// refKey makes each login's ref; nil leaves every login without one.
+	refKey []byte
 	client *http.Client
 	now    func() time.Time
 }
 
 func newWatcher(file string) *watcher {
 	w := &watcher{logins: map[string]*login{}, serving: map[string]serving{}, file: file, client: &http.Client{Timeout: 20 * time.Second}, now: time.Now}
+	key, err := loadRefKey(filepath.Join(filepath.Dir(file), refKeyFile))
+	if err != nil {
+		log.Printf("gentility-quota: no login_ref key, so no login carries a login_ref: %v", err)
+	}
+	w.refKey = key
 	raw, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return w
@@ -101,6 +110,7 @@ type credential struct {
 	AccessToken string `json:"access_token"`
 	IDToken     string `json:"id_token"`
 	AccountID   string `json:"account_id"`
+	AccountUUID string `json:"account_uuid"`
 	LastRefresh string `json:"last_refresh"`
 }
 
@@ -162,6 +172,9 @@ func (w *watcher) sweep(ctx context.Context) {
 		cred, err := readCredential(h.AuthIndex)
 		w.mu.Lock()
 		l := w.logins[h.AuthIndex]
+		if l != nil && err == nil {
+			w.setRef(l, cred)
+		}
 		ready := l != nil && l.ready(w.now(), cred.LastRefresh)
 		w.mu.Unlock()
 		if !ready {
@@ -179,6 +192,24 @@ func (w *watcher) sweep(ctx context.Context) {
 		w.mu.Unlock()
 	}
 	w.save()
+}
+
+// setRef sets a login's ref from the file it was just read from. A login
+// signed in again as another account takes that account's ref, and drops
+// the numbers it held for the last one until its next poll.
+func (w *watcher) setRef(l *login, cred credential) {
+	ref := loginRef(w.refKey, l.Provider, identity(l.Provider, cred))
+	if ref == "" && w.refKey != nil && !l.unnamed {
+		log.Printf("gentility-quota: %s login %s names no account, so it has no login_ref", l.Provider, l.AuthIndex)
+	}
+	l.unnamed = ref == ""
+	if ref == l.LoginRef {
+		return
+	}
+	if l.LoginRef != "" {
+		l.Plan, l.Windows, l.Resets, l.Credits = "", []window{}, nil, nil
+	}
+	l.LoginRef, w.dirty = ref, true
 }
 
 // due reports whether a login's next poll has come, and a minute has passed
@@ -215,11 +246,8 @@ func (w *watcher) ask(ctx context.Context, provider string, cred credential) (in
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", pollUserAgent)
 	if provider == "codex" {
-		account := chatgptAccountID(cred.IDToken)
-		if account == "" {
-			account = cred.AccountID
-		}
-		if account != "" {
+		account, _ := codexClaims(cred.IDToken)
+		if account = cmp.Or(account, cred.AccountID); account != "" {
 			req.Header.Set("ChatGPT-Account-Id", account)
 		}
 	} else {
@@ -235,24 +263,29 @@ func (w *watcher) ask(ctx context.Context, provider string, cred credential) (in
 	return resp.StatusCode, retryAfter(resp.Header.Get("Retry-After"), w.now()), body, err
 }
 
-// chatgptAccountID reads the account claim of a Codex id_token. The token is
-// not verified: it only names the account to ask about.
-func chatgptAccountID(idToken string) string {
+// codexClaims reads a Codex id_token's account and user claims. The token is
+// not verified: it only names the account to ask about and the login's ref.
+// The account is the ChatGPT workspace, which every seat of a Team plan
+// shares; the user is the person.
+func codexClaims(idToken string) (account, user string) {
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {
-		return ""
+		return "", ""
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	var claims struct {
+		Sub  string `json:"sub"`
 		Auth struct {
 			AccountID string `json:"chatgpt_account_id"`
+			UserID    string `json:"chatgpt_user_id"`
+			OldUserID string `json:"user_id"`
 		} `json:"https://api.openai.com/auth"`
 	}
 	_ = json.Unmarshal(raw, &claims)
-	return claims.Auth.AccountID
+	return claims.Auth.AccountID, cmp.Or(claims.Auth.UserID, claims.Auth.OldUserID, claims.Sub)
 }
 
 func retryAfter(value string, now time.Time) time.Duration {
