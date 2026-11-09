@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -37,27 +38,21 @@ func loadRefKey(file string) ([]byte, error) {
 	return key, nil
 }
 
-// makeRefKey writes a new key, readable by the proxy's user only. The file is
-// created exclusively, so a key once made is never overwritten.
+// makeRefKey writes a new key, readable by the proxy's user only. It is
+// written whole beside the key file and linked into place, which fails when a
+// key is already there: the file appears whole or not at all, and a key once
+// made is never overwritten.
 func makeRefKey(file string) ([]byte, error) {
 	key := make([]byte, refKeySize)
 	rand.Read(key)
-	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+	pending := file + ".pending"
+	if err := writeDurably(pending, key); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := f.Write(key); err != nil {
-		f.Close()
-		return nil, err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return nil, err
-	}
-	if err := f.Close(); err != nil {
+	defer os.Remove(pending)
+	if err := os.Link(pending, file); errors.Is(err, os.ErrExist) {
+		return os.ReadFile(file)
+	} else if err != nil {
 		return nil, err
 	}
 	dir, err := os.Open(filepath.Dir(file))
@@ -68,26 +63,31 @@ func makeRefKey(file string) ([]byte, error) {
 	return key, dir.Sync()
 }
 
-// loginRef is the login's ref, or "" when there is no key or no account id.
-func loginRef(key []byte, provider, account string) string {
-	if key == nil || account == "" {
+// loginRef is the login's ref, or "" when there is no key or no identity.
+func loginRef(key []byte, provider, identity string) string {
+	if key == nil || identity == "" {
 		return ""
 	}
 	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(provider + "\n" + account))
+	mac.Write([]byte(provider + "\n" + identity))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// accountID is the provider's id for the account a login file signs in as:
-// for Codex the id_token's account claim, else the file's account_id (the
-// pair a poll sends as ChatGPT-Account-Id); for Claude the account_uuid
-// upstream writes at sign-in and at each refresh.
-func accountID(provider string, cred credential) string {
-	if provider == "codex" {
-		if account := chatgptAccountID(cred.IDToken); account != "" {
-			return account
-		}
-		return cred.AccountID
+// identity names the person a login file signs in as, or "" when the file
+// does not say: for Codex the ChatGPT account (the id_token's claim, else the
+// file's account_id) and the user within it, since every seat of a Team plan
+// shares the account; for Claude the account_uuid upstream writes at sign-in
+// and keeps through each refresh. Where Anthropic's profile does not answer,
+// upstream makes that uuid up from the login file, so such a ref names the
+// file rather than the account.
+func identity(provider string, cred credential) string {
+	if provider != "codex" {
+		return cred.AccountUUID
 	}
-	return cred.AccountUUID
+	account, user := codexClaims(cred.IDToken)
+	account = cmp.Or(account, cred.AccountID)
+	if account == "" || user == "" {
+		return ""
+	}
+	return account + "\n" + user
 }

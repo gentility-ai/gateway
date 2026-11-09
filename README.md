@@ -30,8 +30,12 @@ built against the same release through the plugin ABI.
 From plugin 0.6.0 each login in the record carries a **`login_ref`**, so the
 server can tell its logins apart over time: two on one plan, or one whose
 `auth_index` moved when the set of logins changed. It is HMAC-SHA256 over the
-provider and the provider's account id (Codex's `chatgpt_account_id`, Claude's
-`account_uuid`), under a key that never leaves the node:
+provider and who the login signs in as, under a key that never leaves the
+node. For Codex that is the ChatGPT account (`chatgpt_account_id`) and the
+user within it (`chatgpt_user_id`), since every seat of a Team plan shares
+the account. For Claude it is `account_uuid`; where Anthropic's profile does
+not answer, upstream makes that up from the login file, and the ref then
+names the file. The key:
 - the plugin makes the key itself on its first start: 32 random bytes in
   `gentility-quota-ref.key`, beside the quota record, readable by the proxy's
   user only;

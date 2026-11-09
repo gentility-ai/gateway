@@ -22,6 +22,9 @@ type login struct {
 	Resets    *int     `json:"resets,omitempty"`
 	Credits   *credits `json:"credits,omitempty"`
 	Poll      poll     `json:"poll"`
+	// unnamed is set once the missing account has been logged, so it is
+	// logged once per login, not on every poll.
+	unnamed bool
 }
 
 type window struct {
